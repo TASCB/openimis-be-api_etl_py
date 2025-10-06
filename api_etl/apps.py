@@ -3,66 +3,355 @@ from django.apps import AppConfig
 MODULE_NAME = "api_etl"
 
 DEFAULT_CONFIG = {
-    "auth_type": "basic",  # noauth, basic, bearer
-    "auth_basic_username": "",  # basic auth username
-    "auth_basic_password": "",  # basic auth password
-    "auth_bearer_token": "",  # bearer token
+    # --- Auth ---
+    "auth_type": "basic",                      # noauth | basic | bearer
+    "auth_basic_username": "",
+    "auth_basic_password": "",
+    "auth_bearer_token": "",
 
-    "source_http_method": "",  # valid input for requests.request required
-    "source_url": "",
-    "source_headers": {},
-    "source_batch_size": 50,
+    # --- Export API (Survey Solutions HQ) ---
+    "source_mode": "export_api",
+    "export_base_url": "",                     # e.g. http://192.168.0.15:9700 or http://192.168.0.15:9700/openimis
+    "export_api_prefix": "/api/v1",
+    "export_format": "Tabular",
+    "export_interview_status": "All",
+    "export_include_meta": False,
+    "export_tab_name_contains": "",            # e.g. "individual_test"
+    "export_tmp_dir": "/tmp/ss_exports",
+    "export_poll_interval_seconds": 3,
+    "export_timeout_seconds": 900,
+    "export_keep_zip": False,
 
-    "adapter_first_name_field": "firstName",
-    "adapter_last_name_field": "lastName",
-    "adapter_dob_field": "dateOfBirth",
+    # --- Questionnaire default(s) ---
+    "questionnaire_id": "",                    # single
+    "export_questionnaire_ids": [],            # or multiple
+
+    # --- Adapter field mapping (core) ---
+    "adapter_first_name_field": "firstname",
+    "adapter_last_name_field": "lastname",
+    "adapter_phone_field": "phoneNumber",
+    "adapter_gender_field": "gender",
+    "adapter_email_field": "email",
     "adapter_location_name_field": "locationName",
     "adapter_location_code_field": "locationCode",
+    "adapter_external_id_field": "interview__key",
+    "adapter_interview_key_field": "interview_key",
+    "adapter_dob_field": "dob",
+    "adapter_gender_map": {"1": "M", "2": "F"},
 
+    # --- Adapter field mapping (education, health, WASH, etc.) ---
+    "adapter_recipient_info": "recipient_info",
+    "adapter_relationship_to_head_field": "relationship_to_head",
+    "adapter_id_type_field": "id_type",
+    "adapter_national_id_no_field": "national_id_no",
+    "adapter_other_id_no_field": "other_id_no",
+    "adapter_marital_status_field": "marital_status",
+
+    "adapter_ever_attended_school_field": "ever_attended_school",
+    "adapter_currently_in_school_field": "currently_in_school",
+    "adapter_current_grade_field": "current_grade",
+    "adapter_highest_grade_completed_field": "highest_grade_completed",
+    "adapter_literate_field": "literate",
+
+    "adapter_school_district_code_field": "school_district_code",
+    "adapter_school_ward_code_field": "school_ward_code",
+    "adapter_school_facility_code_ps_field": "school_facility_code_ps",
+    "adapter_school_facility_code_ss_field": "school_facility_code_ss",
+    "adapter_school_ownership_field": "school_ownership",
+    "adapter_schooling_payer_field": "schooling_payer",
+    "adapter_school_transport_mode_field": "school_transport_mode",
+    "adapter_reason_never_attended_field": "reason_never_attended",
+    "adapter_reason_not_in_school_field": "reason_not_in_school",
+
+    "adapter_had_illness_2w_field": "had_illness_2w",
+    "adapter_illness_type_multi_field": "illness_type_multi",
+    "adapter_health_insurance_type_field": "health_insurance_type",
+    "adapter_mvc_benefits_field": "mvc_benefits",
+    "adapter_attends_health_facility_field": "attends_health_facility",
+    "adapter_hfac_district_code_field": "hfac_district_code",
+    "adapter_hfac_ward_code_field": "hfac_ward_code",
+    "adapter_health_facility_code_field": "health_facility_code",
+    "adapter_health_facility_code_other_field": "health_facility_code_other",
+    "adapter_health_facility_name_other_field": "health_facility_name_other",
+
+    "adapter_wg_visual_field": "wg_visual",
+    "adapter_wg_hearing_field": "wg_hearing",
+    "adapter_wg_mobility_field": "wg_mobility",
+    "adapter_wg_memory_field": "wg_memory",
+    "adapter_wg_selfcare_field": "wg_selfcare",
+    "adapter_wg_communication_field": "wg_communication",
+    "adapter_albino_field": "albino",
+
+    "adapter_employment_status_field": "employment_status",
+
+    "adapter_region_name_field": "region_name",
+    "adapter_region_code_field": "region_code",
+    "adapter_district_name_field": "district_name",
+    "adapter_district_code_field": "district_code",
+    "adapter_ward_name_field": "ward_name",
+    "adapter_ward_code_field": "ward_code",
+    "adapter_village_name_field": "village_name",
+    "adapter_village_code_field": "village_code",
+    "adapter_settlement_type_field": "settlement_type",
+
+    "adapter_tf4_no_field": "tf4_no",
+    "adapter_hh_serial_field": "hh_serial",
+    "adapter_veo_name_field": "veo_name",
+    "adapter_veo_phone_field": "veo_phone",
+    "adapter_supervisor_field": "supervisor",
+    "adapter_hh_status_field": "hh_status",
+
+    # GPS (if exported as numeric columns)
+    # "adapter_gps_lat_field": "gps__lat",
+    # "adapter_gps_lon_field": "gps__lng",
+    # "adapter_gps_alt_field": "gps__alt",
+    # "adapter_gps_acc_field": "gps__acc",
+
+    "adapter_consent_field": "consent",
+    "adapter_interview_date_field": "interview_date",
+
+    "adapter_household_size_field": "household_size",
+    "adapter_household_photo_url_field": "household_photo_url",
+    "adapter_household_representative_field": "household_representative",
+
+    "adapter_assets_owned_field": "assets_owned",
+    "adapter_primary_saving_channel_field": "primary_saving_channel",
+    "adapter_preferred_payment_mode_field": "preferred_payment_mode",
+    "adapter_bank_code_field": "bank_code",
+    "adapter_bank_account_no_field": "bank_account_no",
+    "adapter_mobile_network_field": "mobile_network",
+    "adapter_mobile_msisdn_field": "mobile_msisdn",
+
+    "adapter_floor_material_field": "floor_material",
+    "adapter_wall_material_field": "wall_material",
+    "adapter_roof_material_field": "roof_material",
+    "adapter_rooms_total_field": "rooms_total",
+    "adapter_rooms_sleeping_field": "rooms_sleeping",
+    "adapter_has_kitchen_field": "has_kitchen",
+    "adapter_grid_connected_field": "grid_connected",
+    "adapter_lighting_fuel_field": "lighting_fuel",
+    "adapter_cooking_fuel_field": "cooking_fuel",
+    "adapter_tenure_status_field": "tenure_status",
+
+    "adapter_income_support_sources_field": "income_support_sources",
+    "adapter_food_support_sources_field": "food_support_sources",
+    "adapter_toilet_type_field": "toilet_type",
+    "adapter_toilet_shared_with_field": "toilet_shared_with",
+    "adapter_handwashing_place_field": "handwashing_place",
+    "adapter_drinking_water_source_field": "drinking_water_source",
+    "adapter_water_treatment_field": "water_treatment",
+    "adapter_interview_result_field": "interview_result",
+
+    # --- Derived/household grouping (used by adapter logic) ---
+    "group_code_prefix": "P3",
+    "group_code_midfix": "000",
+
+    # --- Sink (import into openIMIS Individuals) ---
+    # Upsert by json_ext.external_id (stable interview key)
     "sink_model_lookup_field": "json_ext__external_id",
     "sink_update_existing": True,
 
+    # Workflow handler to run after upload (short name or dotted class)
+    "sink_workflow": "api_etl.workflows.targeting.TargetingWorkflow",
+
+    # Grouping column for bulk importer (fallback handled in sink)
+    "sink_group_aggregation_column": "location_code",
+
+    # CSV columns passed to bulk importer.
+    # Includes group_code & individual_code so the UI/importer can surface them,
+    # and external_id + json_ext for idempotency + no-loss payload.
+    "sink_csv_fields": [
+        "first_name", "last_name", "dob", "gender",
+        "location_name", "location_code", "phone", "email",
+        "interview_key", "group_code", "individual_code",
+        "external_id", "json_ext"
+    ],
+
+    # Optional: auto-trigger the workflow after upload
+    "sink_trigger_workflow_after_upload": False,
+
+    # --- GraphQL perms ---
     "gql_query_api_etl_rule_perms": ["953001"],
     "gql_mutation_execute_api_etl_rule_perms": ["953002"],
+
+    # --- Misc ---
+    "skip_integration_test": False,
 }
 
 
 class ApiEtlConfig(AppConfig):
-    default_auto_field = 'django.db.models.BigAutoField'
+    default_auto_field = "django.db.models.BigAutoField"
     name = MODULE_NAME
+    label = MODULE_NAME
+    verbose_name = "API ETL"
 
+    # Keep a copy of merged config here
+    config = DEFAULT_CONFIG.copy()
+
+    # Declare known attributes to help IDEs; _load_config sets all dynamically.
     auth_type = None
     auth_basic_username = None
     auth_basic_password = None
     auth_bearer_token = None
 
-    source_http_method = None
-    source_url = None
-    source_headers = None
-    source_batch_size = None
+    source_mode = None
+    export_base_url = None
+    export_api_prefix = None
+    export_format = None
+    export_interview_status = None
+    export_include_meta = None
+    export_tab_name_contains = None
+    export_tmp_dir = None
+    export_poll_interval_seconds = None
+    export_timeout_seconds = None
+    export_keep_zip = None
+
+    questionnaire_id = None
+    export_questionnaire_ids = None
 
     adapter_first_name_field = None
     adapter_last_name_field = None
-    adapter_dob_field = None
+    adapter_phone_field = None
+    adapter_gender_field = None
+    adapter_email_field = None
     adapter_location_name_field = None
     adapter_location_code_field = None
+    adapter_external_id_field = None
+    adapter_interview_key_field = None
+    adapter_dob_field = None
+    adapter_gender_map = None
 
-    sink_model_lookup_field = None
-    sink_update_existing = None
+    adapter_recipient_info = None
+    adapter_relationship_to_head_field = None
+    adapter_id_type_field = None
+    adapter_national_id_no_field = None
+    adapter_other_id_no_field = None
+    adapter_marital_status_field = None
 
-    gql_query_api_etl_rule_perms = None
-    gql_mutation_execute_api_etl_rule_perms = None
+    adapter_ever_attended_school_field = None
+    adapter_currently_in_school_field = None
+    adapter_current_grade_field = None
+    adapter_highest_grade_completed_field = None
+    adapter_literate_field = None
+
+    adapter_school_district_code_field = None
+    adapter_school_ward_code_field = None
+    adapter_school_facility_code_ps_field = None
+    adapter_school_facility_code_ss_field = None
+    adapter_school_ownership_field = None
+    adapter_schooling_payer_field = None
+    adapter_school_transport_mode_field = None
+    adapter_reason_never_attended_field = None
+    adapter_reason_not_in_school_field = None
+
+    adapter_had_illness_2w_field = None
+    adapter_illness_type_multi_field = None
+    adapter_health_insurance_type_field = None
+    adapter_mvc_benefits_field = None
+    adapter_attends_health_facility_field = None
+    adapter_hfac_district_code_field = None
+    adapter_hfac_ward_code_field = None
+    adapter_health_facility_code_field = None
+    adapter_health_facility_code_other_field = None
+    adapter_health_facility_name_other_field = None
+
+    adapter_wg_visual_field = None
+    adapter_wg_hearing_field = None
+    adapter_wg_mobility_field = None
+    adapter_wg_memory_field = None
+    adapter_wg_selfcare_field = None
+    adapter_wg_communication_field = None
+    adapter_albino_field = None
+
+    adapter_employment_status_field = None
+
+    adapter_region_name_field = None
+    adapter_region_code_field = None
+    adapter_district_name_field = None
+    adapter_district_code_field = None
+    adapter_ward_name_field = None
+    adapter_ward_code_field = None
+    adapter_village_name_field = None
+    adapter_village_code_field = None
+    adapter_settlement_type_field = None
+
+    adapter_tf4_no_field = None
+    adapter_hh_serial_field = None
+    adapter_veo_name_field = None
+    adapter_veo_phone_field = None
+    adapter_supervisor_field = None
+    adapter_hh_status_field = None
+
+    adapter_gps_lat_field = None
+    adapter_gps_lon_field = None
+    adapter_gps_alt_field = None
+    adapter_gps_acc_field = None
+
+    adapter_consent_field = None
+    adapter_interview_date_field = None
+
+    adapter_household_size_field = None
+    adapter_household_photo_url_field = None
+    adapter_household_representative_field = None
+
+    adapter_assets_owned_field = None
+    adapter_primary_saving_channel_field = None
+    adapter_preferred_payment_mode_field = None
+    adapter_bank_code_field = None
+    adapter_bank_account_no_field = None
+    adapter_mobile_network_field = None
+    adapter_mobile_msisdn_field = None
+
+    adapter_floor_material_field = None
+    adapter_wall_material_field = None
+    adapter_roof_material_field = None
+    adapter_rooms_total_field = None
+    adapter_rooms_sleeping_field = None
+    adapter_has_kitchen_field = None
+    adapter_grid_connected_field = None
+    adapter_lighting_fuel_field = None
+    adapter_cooking_fuel_field = None
+    adapter_tenure_status_field = None
+
+    adapter_income_support_sources_field = None
+    adapter_food_support_sources_field = None
+    adapter_toilet_type_field = None
+    adapter_toilet_shared_with_field = None
+    adapter_handwashing_place_field = None
+    adapter_drinking_water_source_field = None
+    adapter_water_treatment_field = None
+    adapter_interview_result_field = None
+
+    # Convenience: computed endpoint base (export_base_url + export_api_prefix)
+    export_endpoint_base = None
 
     @classmethod
-    def _load_config(cls, cfg):
+    def _load_config(cls, cfg: dict):
         """
-        Load all config fields that match current AppConfig class fields, all custom fields have to be loaded separately
+        Merge DB config onto class:
+        - set every key as an attribute (even if not predeclared)
+        - maintain a full dict copy in `config`
+        - compute `export_endpoint_base`
         """
-        for field in cfg:
-            if hasattr(ApiEtlConfig, field):
-                setattr(ApiEtlConfig, field, cfg[field])
+        if not isinstance(cfg, dict):
+            cfg = {}
+
+        # Keep full copy
+        cls.config = {**DEFAULT_CONFIG, **cfg}
+
+        # Set every key dynamically
+        for k, v in cls.config.items():
+            setattr(cls, k, v)
+
+        # Compute endpoint base once for convenience: {export_base_url}{export_api_prefix}
+        base = (cls.export_base_url or "").rstrip("/")
+        prefix = (cls.export_api_prefix or "").strip()
+        if prefix and not prefix.startswith("/"):
+            prefix = "/" + prefix
+        cls.export_endpoint_base = (base + prefix) if base else prefix or None
 
     def ready(self):
+        # Load from DB; if missing, create defaults
         from core.models import ModuleConfiguration
-        cfg = ModuleConfiguration.get_or_default(self.name, DEFAULT_CONFIG)
+        cfg = ModuleConfiguration.get_or_default(self.name, DEFAULT_CONFIG.copy())
         self._load_config(cfg)

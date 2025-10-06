@@ -1,10 +1,56 @@
-**/venv
-**/.env
-**/.idea
-**/__pycache__
-build
-dist
-*.egg-info
-**/.vscode
-**/*.mo
-locale/__init__.py
+# TASCB-specific configurations
+tascb_config/
+custom_config/
+deployment/tascb/
+
+# Environment variables
+.env
+.env.local
+.env.tascb
+
+# Database
+*.db
+*.sqlite
+connection_strings.py
+
+# Logs
+*.log
+logs/
+
+# Secrets
+config/secrets.yml
+*.key
+*.pem
+
+# Python
+__pycache__/
+*.pyc
+venv/
+
+# Data files
+*.csv
+*.xlsx
+data/raw/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Virtual Environment
+etlvenv/
+env/
+venv/
+.venv/
+
+# Python build artifacts
+*.egg-info/
+build/
+dist/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Environment variables
+.env
+.env.local

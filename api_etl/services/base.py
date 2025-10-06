@@ -7,7 +7,7 @@ from api_etl.sources import DataSource
 
 logger = logging.getLogger(__name__)
 
-
+#ETL class (called by the survey solution Service)
 class ETLService(metaclass=abc.ABCMeta):
     """
     ETL Service class representing a full ETL pipeline

@@ -63,3 +63,56 @@ class ExampleIndividualSource(DataSource):
                 in_progress = False
             else:
                 current_index += ApiEtlConfig.source_batch_size
+
+
+
+
+# [CONFIG ADMIN
+#   {
+
+
+#     "auth_type": "basic",
+#     "auth_basic_username": "env:SURVEYSOLUTION_USERNAME",
+#     "auth_basic_password": "env:SURVEYSOLUTION_PASSWORD",
+#     "source_http_method": "post",
+#     "source_url": "http://192.168.0.15:9700/graphql",
+#     "workspace": "openimis",
+#     "gql_query": "query PullPage($workspace: String!, $take: Int!, $skip: Int!) { interviews(workspace: $workspace, take: $take, skip: $skip) { totalCount nodes { questionnaireId } } }",
+#     "gql_data_path": "data.interviews.nodes",
+#     "gql_total_path": "data.interviews.totalCount",
+#     "adapter_field_map": {
+#       "firstName": "firstname",
+#       "lastName": "lastname"
+#     },
+#     "adapter_output_map": {
+#       "first_name": "first_name",
+#       "last_name": "last_name"
+#     },
+#     "adapter_external_id_var": "interview__key",
+#     "sink_model_lookup_field": "json_ext__external_id",
+#     "sink_update_existing": true
+#   },
+#   {
+#     "name": "PMTETLService",
+#     "service_class": "PMTETLService",
+#     "auth_type": "noauth",
+#     "source_http_method": "get",
+#     "source_url": "http://192.168.0.20:9000/api/v1/pmt",
+#     "workspace": "openimis",
+#     "gql_query": "",
+#     "gql_data_path": "data.pmt.nodes",
+#     "gql_total_path": "data.pmt.totalCount",
+#     "adapter_field_map": {
+#       "householdId": "hh_id",
+#       "householdHead": "hh_head"
+#     },
+#     "adapter_output_map": {
+#       "household_id": "household_id",
+#       "head_name": "head_name"
+#     },
+#     "adapter_external_id_var": "hh_id",
+#     "sink_model_lookup_field": "json_ext__household_id",
+#     "sink_update_existing": true
+#   }
+# ]
+
