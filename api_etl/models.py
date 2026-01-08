@@ -195,32 +195,6 @@ class PulledHistory(HistoryModel):
 
         return queryset
 
-    @classmethod
-    def create_from_paa_etl_run(cls, paa_name, district_code, region_code, questionnaire_id,
-                               questionnaire_title, questionnaire_version, user, status, ss_batch):
-        """
-        Factory method to create a PulledHistory record for a PAA-based ETL run.
-        """
-        return cls.objects.create(
-            paa_name=paa_name,
-            district_code=district_code,
-            region_code=region_code,
-            questionnaire_id=questionnaire_id,
-            questionnaire_title=questionnaire_title,
-            questionnaire_version=questionnaire_version,
-            status=status,
-            user_created=user,
-            user_updated=user,
-            json_ext={
-                'ss_batch': ss_batch,
-                'etl_metadata': {
-                    'run_type': 'paa_based',
-                    'initiated_by': user.username if user else 'system',
-                    'created_at': datetime.now().isoformat()
-                }
-            }
-        )
-
     @property
     def total_records_affected(self) -> int:
         """Total number of records (individuals) affected in this run."""

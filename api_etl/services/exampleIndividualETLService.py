@@ -1,23 +1,26 @@
-from api_etl.adapters import DataAdapter, ExampleIndividualAdapter
-from api_etl.services.base import ETLService
-from api_etl.sinks import DataSink, IndividualImportSink
-from api_etl.sources import DataSource, ExampleIndividualSource
+import logging
 from core.models import User
-from individual.services import IndividualService
+
+from api_etl.services.base import ETLService
+from api_etl.sources.exampleIndividualSource import ExampleIndividualSource
+from api_etl.adapters.exampleIndividualAdapter import ExampleIndividualAdapter
+
+# FIXED imports ↓
+from api_etl.sinks.base import DataSink
+from api_etl.sinks.individual_import_sink import IndividualImportSink
+
+logger = logging.getLogger(__name__)
 
 
 class ExampleIndividualETLService(ETLService):
     """
-    ETL Pipeline for the mocked Individual API
+    Example ETL Pipeline:
+    Source → Adapter → Sink
     """
 
-    def __init__(self,
-                 user: User,
-                 source: DataSource = None,
-                 adapter: DataAdapter = None,
-                 sink: DataSink = None):
+    def __init__(self, user: User, source=None, adapter=None, sink=None):
         super().__init__(
             source=source or ExampleIndividualSource(),
             adapter=adapter or ExampleIndividualAdapter(),
-            sink=sink or IndividualImportSink(user)
+            sink=sink or IndividualImportSink(user),
         )

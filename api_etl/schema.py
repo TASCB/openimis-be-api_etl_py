@@ -11,7 +11,9 @@ from api_etl.gql_queries import (
     ETLServicesListGQLType,
     PulledHistoryGQLType,
     PulledQuestionnaireGQLType,
+    QuestionnaireGQLType,  # NEW
     resolve_pulled_questionnaires,
+    resolve_available_questionnaires,  # NEW
 )
 from api_etl.gql_mutations import ETLServiceMutation, PAABasedETLMutation
 from api_etl.models import PulledHistory
@@ -37,7 +39,18 @@ class Query(graphene.ObjectType):
     pulled_questionnaires = graphene.List(
         PulledQuestionnaireGQLType,
         region_code=graphene.String(),
-        district_code=graphene.String()
+        district_code=graphene.String(),
+    )
+
+    available_questionnaires = graphene.List(
+        QuestionnaireGQLType,
+        district_code=graphene.String(description="Filter by district code"),
+        region_code=graphene.String(description="Filter by region code"),
+        district_name=graphene.String(description="District name for matching"),
+        show_all=graphene.Boolean(
+            description="Show all questionnaires even with score=0"
+        ),
+        description="List questionnaires from HQ, optionally filtered by PAA",
     )
 
     def resolve_etl_services_by_service_name(parent, info, **kwargs):
@@ -65,9 +78,11 @@ class Query(graphene.ObjectType):
         client_mutation_id = kwargs.get("client_mutation_id")
         if client_mutation_id:
             wait_for_mutation(client_mutation_id)
-            filters.append(Q(mutations__mutation__client_mutation_id=client_mutation_id))
+            filters.append(
+                Q(mutations__mutation__client_mutation_id=client_mutation_id)
+            )
 
-        query = PulledHistory.objects.filter(*filters).order_by('-date_pulled')
+        query = PulledHistory.objects.filter(*filters).order_by("-date_pulled")
         return gql_optimizer.query(query, info)
 
     def resolve_pulled_questionnaires(self, info, **kwargs):
@@ -75,6 +90,12 @@ class Query(graphene.ObjectType):
             raise PermissionError("Unauthorized")
 
         return resolve_pulled_questionnaires(info, **kwargs)
+
+    def resolve_available_questionnaires(self, info, **kwargs):
+        """Fetch questionnaires from HQ, optionally filtered by PAA."""
+        if not info.context.user.has_perms(ApiEtlConfig.gql_query_api_etl_rule_perms):
+            raise PermissionError("Unauthorized")
+        return resolve_available_questionnaires(info, **kwargs)
 
 
 class Mutation(graphene.ObjectType):

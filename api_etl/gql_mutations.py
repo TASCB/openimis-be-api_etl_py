@@ -20,6 +20,7 @@ class ETLServiceMutation(BaseMutation):
     """
     Mutation to execute the ETLService
     """
+
     _mutation_class = "ETLServiceMutation"
     _mutation_module = "api_etl"
 
@@ -44,10 +45,12 @@ class ETLServiceMutation(BaseMutation):
 
             name_of_service = data.pop("name_of_service", None)
             if not name_of_service:
-                return [{
-                    "message": "api_etl.mutation.failed_to_execute_etl_service",
-                    "detail": _("There is no ETL service with provided name"),
-                }]
+                return [
+                    {
+                        "message": "api_etl.mutation.failed_to_execute_etl_service",
+                        "detail": _("There is no ETL service with provided name"),
+                    }
+                ]
 
             etl_service_class = get_class_by_name(ETL_CLASS, name_of_service)
             # Instantiate and execute the ETL service (bridge method on the service)
@@ -56,21 +59,28 @@ class ETLServiceMutation(BaseMutation):
 
             if result.get("success"):
                 return None
-            return [{
-                "message": result.get("message", "api_etl.mutation.failed_to_execute_etl_service"),
-                "detail": result.get("detail", ""),
-            }]
+            return [
+                {
+                    "message": result.get(
+                        "message", "api_etl.mutation.failed_to_execute_etl_service"
+                    ),
+                    "detail": result.get("detail", ""),
+                }
+            ]
         except Exception as exc:
-            return [{
-                "message": "api_etl.mutation.failed_to_execute_etl_service",
-                "detail": str(exc),
-            }]
+            return [
+                {
+                    "message": "api_etl.mutation.failed_to_execute_etl_service",
+                    "detail": str(exc),
+                }
+            ]
 
 
 class PAABasedETLMutation(BaseMutation):
     """
     Mutation to execute PAA-based ETL and track history
     """
+
     _mutation_class = "PAABasedETLMutation"
     _mutation_module = "api_etl"
 
@@ -110,22 +120,31 @@ class PAABasedETLMutation(BaseMutation):
                 paa_name=paa_name,
                 district_code=district_code,
                 region_code=region_code,
-                questionnaire_id=questionnaire_id or "auto-detected",
-                questionnaire_title="Survey Solutions Export",
-                questionnaire_version="1",
+                questionnaire_match={
+                    "questionnaire_id": questionnaire_id or "pending-auto-detection",
+                    "questionnaire_title": None,
+                    "questionnaire_version": None,
+                    "matching_strategy": (
+                        "manual-override" if questionnaire_id else None
+                    ),
+                },
                 user=user,
                 status="running",
-                ss_batch=batch_id
             )
 
             try:
                 # Find and execute the Survey Solutions ETL service
-                etl_service_class = get_class_by_name(ETL_CLASS, "SurveySolutionsService")
+                etl_service_class = get_class_by_name(
+                    ETL_CLASS, "SurveySolutionsService"
+                )
                 if not etl_service_class:
                     from api_etl.utils import get_classes_in_module
+
                     available_services = get_classes_in_module(ETL_CLASS)
                     if available_services:
-                        etl_service_class = get_class_by_name(ETL_CLASS, available_services[0])
+                        etl_service_class = get_class_by_name(
+                            ETL_CLASS, available_services[0]
+                        )
                     else:
                         raise Exception("No ETL service available")
 
@@ -136,7 +155,7 @@ class PAABasedETLMutation(BaseMutation):
                     "region_code": region_code,
                     "questionnaire_id": questionnaire_id,
                     "dry_run": dry_run,
-                    "batch_id": batch_id
+                    "batch_id": batch_id,
                 }
 
                 etl_service = etl_service_class(user, config=service_config)
@@ -149,13 +168,19 @@ class PAABasedETLMutation(BaseMutation):
                     return None
                 else:
                     history_record.status = "failed"
-                    history_record.error_message = result.get("detail", "ETL execution failed")
+                    history_record.error_message = result.get(
+                        "detail", "ETL execution failed"
+                    )
                     history_record.save()
 
-                    return [{
-                        "message": result.get("message", "api_etl.mutation.failed_to_execute_paa_etl"),
-                        "detail": result.get("detail", ""),
-                    }]
+                    return [
+                        {
+                            "message": result.get(
+                                "message", "api_etl.mutation.failed_to_execute_paa_etl"
+                            ),
+                            "detail": result.get("detail", ""),
+                        }
+                    ]
 
             except Exception as exc:
                 # Update history record with error
@@ -165,7 +190,9 @@ class PAABasedETLMutation(BaseMutation):
                 raise exc
 
         except Exception as exc:
-            return [{
-                "message": "api_etl.mutation.failed_to_execute_paa_etl",
-                "detail": str(exc),
-            }]
+            return [
+                {
+                    "message": "api_etl.mutation.failed_to_execute_paa_etl",
+                    "detail": str(exc),
+                }
+            ]
