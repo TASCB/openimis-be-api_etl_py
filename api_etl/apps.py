@@ -4,28 +4,32 @@ MODULE_NAME = "api_etl"
 
 DEFAULT_CONFIG = {
     # --- Auth ---
-    "auth_type": "basic",                      # noauth | basic | bearer
+    "auth_type": "basic",  # noauth | basic | bearer
     "auth_basic_username": "",
     "auth_basic_password": "",
     "auth_bearer_token": "",
-
     # --- Export API (Survey Solutions HQ) ---
     "source_mode": "export_api",
-    "export_base_url": "",                     # e.g. http://192.168.0.15:9700 or http://192.168.0.15:9700/openimis
+    "export_base_url": "",  # e.g. http://192.xxx.x.15:9700 or http://192.xxx.x.15:9700/workspace
     "export_api_prefix": "/api/v1",
     "export_format": "Tabular",
     "export_interview_status": "All",
     "export_include_meta": False,
-    "export_tab_name_contains": "",            # e.g. "individual_test"
+    "export_tab_name_contains": "",  # e.g. "individual_test"
     "export_tmp_dir": "/tmp/ss_exports",
     "export_poll_interval_seconds": 3,
     "export_timeout_seconds": 900,
     "export_keep_zip": False,
-
     # --- Questionnaire default(s) ---
-    "questionnaire_id": "",                    # single
-    "export_questionnaire_ids": [],            # or multiple
-
+    "questionnaire_id": "",  # single
+    "export_questionnaire_ids": [],  # or multiple
+    # --- Questionnaire matching configuration ---
+    "questionnaire_title_prefix": "DODOSO LA KAYA-RM4-",  # Expected prefix in questionnaire titles
+    "district_name_suffixes": [
+        "DC",
+        "TC",
+        "MC",
+    ],  # Valid district suffixes to strip for matching
     # --- Adapter field mapping (core) ---
     "adapter_first_name_field": "firstname",
     "adapter_last_name_field": "lastname",
@@ -38,7 +42,6 @@ DEFAULT_CONFIG = {
     "adapter_interview_key_field": "interview_key",
     "adapter_dob_field": "dob",
     "adapter_gender_map": {"1": "M", "2": "F"},
-
     # --- Adapter field mapping (education, health, WASH, etc.) ---
     "adapter_recipient_info": "recipient_info",
     "adapter_relationship_to_head_field": "relationship_to_head",
@@ -46,13 +49,11 @@ DEFAULT_CONFIG = {
     "adapter_national_id_no_field": "national_id_no",
     "adapter_other_id_no_field": "other_id_no",
     "adapter_marital_status_field": "marital_status",
-
     "adapter_ever_attended_school_field": "ever_attended_school",
     "adapter_currently_in_school_field": "currently_in_school",
     "adapter_current_grade_field": "current_grade",
     "adapter_highest_grade_completed_field": "highest_grade_completed",
     "adapter_literate_field": "literate",
-
     "adapter_school_district_code_field": "school_district_code",
     "adapter_school_ward_code_field": "school_ward_code",
     "adapter_school_facility_code_ps_field": "school_facility_code_ps",
@@ -62,7 +63,6 @@ DEFAULT_CONFIG = {
     "adapter_school_transport_mode_field": "school_transport_mode",
     "adapter_reason_never_attended_field": "reason_never_attended",
     "adapter_reason_not_in_school_field": "reason_not_in_school",
-
     "adapter_had_illness_2w_field": "had_illness_2w",
     "adapter_illness_type_multi_field": "illness_type_multi",
     "adapter_health_insurance_type_field": "health_insurance_type",
@@ -73,7 +73,6 @@ DEFAULT_CONFIG = {
     "adapter_health_facility_code_field": "health_facility_code",
     "adapter_health_facility_code_other_field": "health_facility_code_other",
     "adapter_health_facility_name_other_field": "health_facility_name_other",
-
     "adapter_wg_visual_field": "wg_visual",
     "adapter_wg_hearing_field": "wg_hearing",
     "adapter_wg_mobility_field": "wg_mobility",
@@ -81,9 +80,7 @@ DEFAULT_CONFIG = {
     "adapter_wg_selfcare_field": "wg_selfcare",
     "adapter_wg_communication_field": "wg_communication",
     "adapter_albino_field": "albino",
-
     "adapter_employment_status_field": "employment_status",
-
     "adapter_region_name_field": "region_name",
     "adapter_region_code_field": "region_code",
     "adapter_district_name_field": "district_name",
@@ -93,27 +90,22 @@ DEFAULT_CONFIG = {
     "adapter_village_name_field": "village_name",
     "adapter_village_code_field": "village_code",
     "adapter_settlement_type_field": "settlement_type",
-
     "adapter_tf4_no_field": "tf4_no",
     "adapter_hh_serial_field": "hh_serial",
     "adapter_veo_name_field": "veo_name",
     "adapter_veo_phone_field": "veo_phone",
     "adapter_supervisor_field": "supervisor",
     "adapter_hh_status_field": "hh_status",
-
     # GPS (if exported as numeric columns)
     # "adapter_gps_lat_field": "gps__lat",
     # "adapter_gps_lon_field": "gps__lng",
     # "adapter_gps_alt_field": "gps__alt",
     # "adapter_gps_acc_field": "gps__acc",
-
     "adapter_consent_field": "consent",
     "adapter_interview_date_field": "interview_date",
-
     "adapter_household_size_field": "household_size",
     "adapter_household_photo_url_field": "household_photo_url",
     "adapter_household_representative_field": "household_representative",
-
     "adapter_assets_owned_field": "assets_owned",
     "adapter_primary_saving_channel_field": "primary_saving_channel",
     "adapter_preferred_payment_mode_field": "preferred_payment_mode",
@@ -121,7 +113,6 @@ DEFAULT_CONFIG = {
     "adapter_bank_account_no_field": "bank_account_no",
     "adapter_mobile_network_field": "mobile_network",
     "adapter_mobile_msisdn_field": "mobile_msisdn",
-
     "adapter_floor_material_field": "floor_material",
     "adapter_wall_material_field": "wall_material",
     "adapter_roof_material_field": "roof_material",
@@ -132,7 +123,6 @@ DEFAULT_CONFIG = {
     "adapter_lighting_fuel_field": "lighting_fuel",
     "adapter_cooking_fuel_field": "cooking_fuel",
     "adapter_tenure_status_field": "tenure_status",
-
     "adapter_income_support_sources_field": "income_support_sources",
     "adapter_food_support_sources_field": "food_support_sources",
     "adapter_toilet_type_field": "toilet_type",
@@ -141,39 +131,40 @@ DEFAULT_CONFIG = {
     "adapter_drinking_water_source_field": "drinking_water_source",
     "adapter_water_treatment_field": "water_treatment",
     "adapter_interview_result_field": "interview_result",
-
     # --- Derived/household grouping (used by adapter logic) ---
     "group_code_prefix": "P3",
     "group_code_midfix": "000",
-
     # --- Sink (import into openIMIS Individuals) ---
     # Upsert by json_ext.external_id (stable interview key)
     "sink_model_lookup_field": "json_ext__external_id",
     "sink_update_existing": True,
-
     # Workflow handler to run after upload (short name or dotted class)
     "sink_workflow": "api_etl.workflows.targeting.TargetingWorkflow",
-
     # Grouping column for bulk importer (fallback handled in sink)
     "sink_group_aggregation_column": "location_code",
-
     # CSV columns passed to bulk importer.
     # Includes group_code & individual_code so the UI/importer can surface them,
     # and external_id + json_ext for idempotency + no-loss payload.
     "sink_csv_fields": [
-        "first_name", "last_name", "dob", "gender",
-        "location_name", "location_code", "phone", "email",
-        "interview_key", "group_code", "individual_code",
-        "external_id", "json_ext"
+        "first_name",
+        "last_name",
+        "dob",
+        "gender",
+        "location_name",
+        "location_code",
+        "phone",
+        "email",
+        "interview_key",
+        "group_code",
+        "individual_code",
+        "external_id",
+        "json_ext",
     ],
-
     # Optional: auto-trigger the workflow after upload
     "sink_trigger_workflow_after_upload": False,
-
     # --- GraphQL perms ---
     "gql_query_api_etl_rule_perms": ["953001"],
     "gql_mutation_execute_api_etl_rule_perms": ["953002"],
-
     # --- Misc ---
     "skip_integration_test": False,
 }
@@ -217,7 +208,8 @@ class ApiEtlConfig(AppConfig):
         cls.export_endpoint_base = (base + prefix) if base else prefix or None
 
     def ready(self):
-        #Load or create the ModuleConfiguration record and apply it.
+        # Load or create the ModuleConfiguration record and apply it.
         from core.models import ModuleConfiguration
+
         cfg = ModuleConfiguration.get_or_default(self.name, DEFAULT_CONFIG.copy())
         self._load_config(cfg)

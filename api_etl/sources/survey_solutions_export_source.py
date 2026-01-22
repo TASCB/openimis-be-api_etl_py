@@ -4,7 +4,7 @@ import os
 import re
 import time
 import logging
-import zipfile 
+import zipfile
 from typing import Dict, Iterable, Iterator, List, Optional, Union
 
 import requests
@@ -12,15 +12,17 @@ import requests
 from api_etl.apps import ApiEtlConfig as C
 from api_etl.sources.base import DataSource
 from api_etl.utils import (
-    iter_tab_files,                   
+    iter_tab_files,
     to_datetime_str,
-    get_timestamped_batch_identifier, 
+    get_timestamped_batch_identifier,
 )
 
 LOG = logging.getLogger(__name__)
 
 _JSON_HEADERS = {"Accept": "application/json", "Content-Type": "application/json"}
-_QID_RE = re.compile(r"^[0-9a-fA-F-]{32,36}\$\d+$")  # GUID (with or without dashes) + $version
+_QID_RE = re.compile(
+    r"^[0-9a-fA-F-]{32,36}\$\d+$"
+)  # GUID (with or without dashes) + $version
 
 
 # ----------------------------- helpers -----------------------------
@@ -35,6 +37,7 @@ def _as_list(val):
         return [s.strip() for s in val.split(",") if s.strip()]
     return []
 
+
 def _should_exclude_tab(tab_basename: str) -> bool:
     """
     tab_basename is the file name without extension, e.g. 'hhroster' or 'interview__actions'.
@@ -42,6 +45,7 @@ def _should_exclude_tab(tab_basename: str) -> bool:
     """
     try:
         from api_etl.apps import ApiEtlConfig as C
+
         patterns = _as_list(getattr(C, "export_exclude_tabs_contains", []))
     except Exception:
         patterns = []
@@ -67,10 +71,14 @@ def _compose_endpoint_base(
 
     base = (base_url or getattr(C, "export_base_url", "") or "").rstrip("/")
     if not base:
-        raise ValueError("Missing base_url. Provide per call or set EXPORT_BASE_URL in ModuleConfiguration.")
+        raise ValueError(
+            "Missing base_url. Provide per call or set EXPORT_BASE_URL in ModuleConfiguration."
+        )
 
     ws = (workspace or getattr(C, "export_workspace", "") or "").strip().strip("/")
-    prefix = (api_prefix or getattr(C, "export_api_prefix", "/api/v2") or "/api/v2").strip()
+    prefix = (
+        api_prefix or getattr(C, "export_api_prefix", "/api/v2") or "/api/v2"
+    ).strip()
     if not prefix.startswith("/"):
         prefix = "/" + prefix
 
@@ -94,8 +102,16 @@ def _merge_auth(
         return {"headers": {"Authorization": f"Bearer {token}"}}
 
     if at == "basic":
-        user = username if username is not None else getattr(C, "auth_basic_username", None)
-        pwd = password if password is not None else getattr(C, "auth_basic_password", None)
+        user = (
+            username
+            if username is not None
+            else getattr(C, "auth_basic_username", None)
+        )
+        pwd = (
+            password
+            if password is not None
+            else getattr(C, "auth_basic_password", None)
+        )
         if not user or pwd is None:
             raise ValueError("Basic auth requires username and password.")
         return {"auth": (user, pwd)}
@@ -111,10 +127,11 @@ class SurveySolutionsExportSource(DataSource):
       - meta_api_prefix: used for metadata/listing (e.g., /api/v1/questionnaires)
       - api_prefix:      used for export lifecycle (e.g., /api/v2/export)
     """
+
     base_url: str = ""
     workspace: str = ""
-    api_prefix: str = "/api/v2"       
-    meta_api_prefix: str = "/api/v1"  
+    api_prefix: str = "/api/v2"
+    meta_api_prefix: str = "/api/v1"
 
     # ------------------- list available questionnaires -------------------
     def list_questionnaires(
@@ -122,8 +139,8 @@ class SurveySolutionsExportSource(DataSource):
         *,
         base_url: Optional[str] = None,
         workspace: Optional[str] = None,
-        api_prefix: Optional[str] = None,       
-        meta_api_prefix: Optional[str] = None,     
+        api_prefix: Optional[str] = None,
+        meta_api_prefix: Optional[str] = None,
         auth_type: Optional[str] = None,
         username: Optional[str] = None,
         password: Optional[str] = None,
@@ -146,10 +163,15 @@ class SurveySolutionsExportSource(DataSource):
         )
 
         endpoint_base = _compose_endpoint_base(
-            base_url=base_url or getattr(self, "base_url", None) or getattr(C, "export_base_url", None),
-            workspace=workspace or getattr(self, "workspace", None) or getattr(C, "export_workspace", None),
+            base_url=base_url
+            or getattr(self, "base_url", None)
+            or getattr(C, "export_base_url", None),
+            workspace=workspace
+            or getattr(self, "workspace", None)
+            or getattr(C, "export_workspace", None),
             api_prefix=prefix,
         )
+
         url = f"{endpoint_base}/questionnaires"
         rkwargs = _merge_auth(
             auth_type=auth_type,
@@ -162,56 +184,181 @@ class SurveySolutionsExportSource(DataSource):
         if "headers" in rkwargs:
             headers.update(rkwargs["headers"])
 
-        LOG.info("Fetching questionnaires list from %s", url)
-        r = requests.get(url, headers=headers, timeout=30, **{k: v for k, v in rkwargs.items() if k != "headers"})
-        r.raise_for_status()
+        # ---- FIX: paginate the questionnaires list ----
+        limit = int(getattr(C, "questionnaires_page_size", 200) or 200)
+        offset = 0
+        all_rows: List[Dict] = []
+        total_count = None
 
-        try:
-            data = r.json()
-        except Exception:
-            LOG.error("Failed to parse JSON: %s", r.text[:500])
-            return []
+        LOG.info(
+            "Fetching questionnaires list from %s (limit=%s, offset=%s)",
+            url,
+            limit,
+            offset,
+        )
 
-        # Normalize format
-        if isinstance(data, dict):
-            if "Questionnaires" in data:
-                data = data["Questionnaires"]
-            elif "questionnaires" in data:
-                data = data["questionnaires"]
-            elif "Items" in data:
-                data = data["Items"]
+        while True:
+            r = requests.get(
+                url,
+                params={"limit": limit, "offset": offset},
+                headers=headers,
+                timeout=30,
+                **{k: v for k, v in rkwargs.items() if k != "headers"},
+            )
+            r.raise_for_status()
+
+            try:
+                payload = r.json()
+            except Exception:
+                LOG.error("Failed to parse JSON: %s", (r.text or "")[:500])
+                break
+
+            # Extract items + optional TotalCount safely
+            if isinstance(payload, dict):
+                if "Items" in payload:
+                    page_items = payload.get("Items") or []
+                    total_count = payload.get("TotalCount", total_count)
+                elif "Questionnaires" in payload:
+                    page_items = payload.get("Questionnaires") or []
+                    total_count = payload.get("TotalCount", total_count)
+                elif "questionnaires" in payload:
+                    page_items = payload.get("questionnaires") or []
+                    total_count = payload.get("TotalCount", total_count)
+                else:
+                    LOG.warning(
+                        "Unexpected questionnaires dict format keys=%s",
+                        list(payload.keys())[:30],
+                    )
+                    page_items = []
+            elif isinstance(payload, list):
+                page_items = payload
             else:
-                LOG.warning("Unexpected questionnaires dict format: %s", data)
-                return []
+                LOG.warning("Expected dict/list, got %s", type(payload))
+                page_items = []
 
-        if not isinstance(data, list):
-            LOG.warning("Expected list, got %s: %s", type(data), data)
-            return []
+            if not isinstance(page_items, list) or len(page_items) == 0:
+                break
 
-        questionnaires: List[Dict] = []
+            all_rows.extend([x for x in page_items if isinstance(x, dict)])
+
+            # Stop conditions
+            if total_count is not None and len(all_rows) >= int(total_count):
+                break
+            if len(page_items) < limit:
+                break
+
+            offset += limit
+
+        data = all_rows
+        LOG.info(
+            "Fetched %d questionnaires from HQ list endpoint (totalCount=%s)",
+            len(data),
+            total_count,
+        )
+
+        # Step 1: Get unique questionnaire GUIDs
+        unique_guids = set()
         for q in data:
-            if not isinstance(q, dict):
-                continue
-            questionnaires.append({
-                "Identity": q.get("QuestionnaireIdentity") or f"{q.get('Id')}${q.get('Version')}",
-                "Id": q.get("QuestionnaireId") or q.get("Id"),
-                "Title": q.get("Title"),
-                "Version": q.get("Version"),
-                "Variable": q.get("Variable"),
-                "LastEntryDate": q.get("LastEntryDate"),
-            })
-        return questionnaires
+            guid = q.get("QuestionnaireId") or q.get("Id")
+            if guid:
+                unique_guids.add(guid)
+
+        LOG.info(
+            "Found %d unique questionnaire GUIDs, fetching all versions...",
+            len(unique_guids),
+        )
+
+        # Step 2: For each GUID, fetch all versions
+        all_questionnaires: List[Dict] = []
+
+        for guid in unique_guids:
+            try:
+                version_url = f"{endpoint_base}/questionnaires/{guid}"
+                LOG.debug("Fetching versions from: %s", version_url)
+
+                r_versions = requests.get(
+                    version_url,
+                    headers=headers,
+                    timeout=30,
+                    **{k: v for k, v in rkwargs.items() if k != "headers"},
+                )
+                r_versions.raise_for_status()
+
+                versions_data = r_versions.json()
+
+                versions_list = []
+                if isinstance(versions_data, dict):
+                    if "Questionnaires" in versions_data:
+                        versions_list = versions_data["Questionnaires"]
+                    elif "questionnaires" in versions_data:
+                        versions_list = versions_data["questionnaires"]
+                    elif "Items" in versions_data:
+                        versions_list = versions_data["Items"]
+                elif isinstance(versions_data, list):
+                    versions_list = versions_data
+
+                for qv in versions_list:
+                    if not isinstance(qv, dict):
+                        continue
+                    all_questionnaires.append(
+                        {
+                            "Identity": qv.get("QuestionnaireIdentity")
+                            or f"{qv.get('Id')}${qv.get('Version')}",
+                            "Id": qv.get("QuestionnaireId") or qv.get("Id"),
+                            "Title": qv.get("Title"),
+                            "Version": qv.get("Version"),
+                            "Variable": qv.get("Variable"),
+                            "LastEntryDate": qv.get("LastEntryDate"),
+                        }
+                    )
+
+            except Exception as e:
+                LOG.warning(
+                    "Failed to fetch versions for questionnaire %s: %s", guid, e
+                )
+                # Fallback: add first matching item from 'data'
+                for q0 in data:
+                    q_guid = q0.get("QuestionnaireId") or q0.get("Id")
+                    if q_guid == guid:
+                        all_questionnaires.append(
+                            {
+                                "Identity": q0.get("QuestionnaireIdentity")
+                                or f"{q0.get('Id')}${q0.get('Version')}",
+                                "Id": q0.get("QuestionnaireId") or q0.get("Id"),
+                                "Title": q0.get("Title"),
+                                "Version": q0.get("Version"),
+                                "Variable": q0.get("Variable"),
+                                "LastEntryDate": q0.get("LastEntryDate"),
+                            }
+                        )
+                        break
+
+        LOG.info("Fetched total of %d questionnaire versions", len(all_questionnaires))
+        return all_questionnaires
 
     # ------------------- low-level Export API calls -------------------
 
-    def _list_jobs(self, endpoint_base: str, rkwargs: Dict, *, limit: int = 50, offset: int = 0) -> list:
+    def _list_jobs(
+        self, endpoint_base: str, rkwargs: Dict, *, limit: int = 50, offset: int = 0
+    ) -> list:
         url = f"{endpoint_base}/export?limit={limit}&offset={offset}"
         headers = dict(_JSON_HEADERS)
         if "headers" in rkwargs:
             headers.update(rkwargs["headers"])
-        r = requests.get(url, headers=headers, timeout=30, **{k: v for k, v in rkwargs.items() if k != "headers"})
+        r = requests.get(
+            url,
+            headers=headers,
+            timeout=30,
+            **{k: v for k, v in rkwargs.items() if k != "headers"},
+        )
         if r.status_code >= 400:
-            LOG.error("Export GET list failed %s %s\nURL=%s\nResp=%s", r.status_code, r.reason, url, r.text[:2000])
+            LOG.error(
+                "Export GET list failed %s %s\nURL=%s\nResp=%s",
+                r.status_code,
+                r.reason,
+                url,
+                r.text[:2000],
+            )
             r.raise_for_status()
         try:
             return r.json() or []
@@ -232,23 +379,32 @@ class SurveySolutionsExportSource(DataSource):
         """
         Scan recent export jobs and return the latest Completed job_id for this questionnaire.
         """
-        fmt = (export_format or getattr(C, "export_format", "Tabular") or "Tabular")
-        ist = (interview_status or getattr(C, "export_interview_status", "All") or "All")
+        fmt = export_format or getattr(C, "export_format", "Tabular") or "Tabular"
+        ist = interview_status or getattr(C, "export_interview_status", "All") or "All"
         best = None
         best_complete_date = ""
 
         for p in range(pages):
-            jobs = self._list_jobs(endpoint_base, rkwargs, limit=page_size, offset=p * page_size)
+            jobs = self._list_jobs(
+                endpoint_base, rkwargs, limit=page_size, offset=p * page_size
+            )
             if not jobs:
                 break
             for j in jobs:
                 try:
                     qid = j.get("QuestionnaireId") or j.get("questionnaireId")
-                    status = (j.get("ExportStatus") or j.get("exportStatus") or "").lower()
+                    status = (
+                        j.get("ExportStatus") or j.get("exportStatus") or ""
+                    ).lower()
                     has_file = bool(j.get("HasExportFile") or j.get("hasExportFile"))
                     efmt = j.get("ExportType") or j.get("exportType") or ""
                     istat = j.get("InterviewStatus") or j.get("interviewStatus") or ""
-                    cdate = j.get("CompleteDate") or j.get("completeDate") or j.get("StartDate") or ""
+                    cdate = (
+                        j.get("CompleteDate")
+                        or j.get("completeDate")
+                        or j.get("StartDate")
+                        or ""
+                    )
                 except Exception:
                     continue
 
@@ -260,7 +416,7 @@ class SurveySolutionsExportSource(DataSource):
                     continue
                 if istat and istat != ist:
                     continue
-               
+
                 if cdate and cdate > best_complete_date:
                     best_complete_date = cdate
                     best = int(j.get("JobId") or j.get("jobId"))
@@ -268,7 +424,10 @@ class SurveySolutionsExportSource(DataSource):
         if best:
             LOG.warning(
                 "Reusing latest Completed export job %s for qid=%s (fmt=%s, status=%s).",
-                best, questionnaire_id, fmt, ist
+                best,
+                questionnaire_id,
+                fmt,
+                ist,
             )
         return best
 
@@ -285,7 +444,9 @@ class SurveySolutionsExportSource(DataSource):
         rkwargs: Dict,
     ) -> int:
         if not _QID_RE.match(questionnaire_id):
-            raise ValueError(f"QuestionnaireId must be 'GUID$version'. Got: {questionnaire_id!r}")
+            raise ValueError(
+                f"QuestionnaireId must be 'GUID$version'. Got: {questionnaire_id!r}"
+            )
 
         body: Dict[str, object] = {
             "QuestionnaireId": questionnaire_id,
@@ -312,21 +473,31 @@ class SurveySolutionsExportSource(DataSource):
         last_exc: Optional[Exception] = None
         for i in range(attempts):
             try:
-                r = requests.post(url, json=body, headers=headers, timeout=60, **rkwargs)
+                r = requests.post(
+                    url, json=body, headers=headers, timeout=60, **rkwargs
+                )
 
                 # ---- Server error: retryable ----
                 if 500 <= r.status_code < 600:
                     LOG.error(
                         "Export POST failed %s %s\nURL=%s\nBody=%s\nResp=%s",
-                        r.status_code, r.reason, url, body, (r.text or "")[:2000]
+                        r.status_code,
+                        r.reason,
+                        url,
+                        body,
+                        (r.text or "")[:2000],
                     )
-                    last_exc = requests.HTTPError(f"{r.status_code} {r.reason}", response=r)
+                    last_exc = requests.HTTPError(
+                        f"{r.status_code} {r.reason}", response=r
+                    )
 
                 # ---- Success ----
                 elif 200 <= r.status_code < 300:
                     data = r.json() or {}
                     job_id = int(data.get("JobId") or data.get("jobId"))
-                    LOG.info("Export job created: %s (qid=%s)", job_id, questionnaire_id)
+                    LOG.info(
+                        "Export job created: %s (qid=%s)", job_id, questionnaire_id
+                    )
                     return job_id
 
                 # ---- Client/other error: do not retry by default ----
@@ -334,16 +505,20 @@ class SurveySolutionsExportSource(DataSource):
                     # Log full context BEFORE raising, so we can see HQ's message.
                     LOG.error(
                         "Export POST error %s %s\nURL=%s\nBody=%s\nResp=%s",
-                        r.status_code, r.reason, url, body, (r.text or "")[:2000]
+                        r.status_code,
+                        r.reason,
+                        url,
+                        body,
+                        (r.text or "")[:2000],
                     )
 
                     # Optional fallback: reuse latest Completed job for selected 4xx statuses
-                    if (
-                        r.status_code in (400, 403, 404)
-                        and getattr(C, "export_reuse_latest_on_4xx", False)
+                    if r.status_code in (400, 403, 404) and getattr(
+                        C, "export_reuse_latest_on_4xx", False
                     ):
                         LOG.warning(
-                            "Attempting fallback to latest Completed export (status=%s).", r.status_code
+                            "Attempting fallback to latest Completed export (status=%s).",
+                            r.status_code,
                         )
                         jid = self._find_latest_completed_job(
                             endpoint_base=endpoint_base,
@@ -352,7 +527,9 @@ class SurveySolutionsExportSource(DataSource):
                             interview_status=interview_status,
                             rkwargs=rkwargs,
                             pages=int(getattr(C, "export_list_scan_pages", 3) or 3),
-                            page_size=int(getattr(C, "export_list_page_size", 50) or 50),
+                            page_size=int(
+                                getattr(C, "export_list_page_size", 50) or 50
+                            ),
                         )
                         if jid:
                             LOG.info("Fallback: reusing Completed export job: %s", jid)
@@ -366,16 +543,22 @@ class SurveySolutionsExportSource(DataSource):
                 if e.response is not None and 400 <= e.response.status_code < 500:
                     LOG.error(
                         "Export POST 4xx, not retrying. URL=%s Body=%s Resp=%s",
-                        url, body, (e.response.text or "")[:2000]
+                        url,
+                        body,
+                        (e.response.text or "")[:2000],
                     )
                     raise
                 last_exc = e
-                LOG.warning("Export POST HTTPError (attempt %s/%s): %s", i + 1, attempts, e)
+                LOG.warning(
+                    "Export POST HTTPError (attempt %s/%s): %s", i + 1, attempts, e
+                )
 
             except Exception as e:
                 # Network/other errors: retry
                 last_exc = e
-                LOG.warning("Export POST network error (attempt %s/%s): %s", i + 1, attempts, e)
+                LOG.warning(
+                    "Export POST network error (attempt %s/%s): %s", i + 1, attempts, e
+                )
 
             if i < attempts - 1:
                 time.sleep(backoff)
@@ -398,7 +581,9 @@ class SurveySolutionsExportSource(DataSource):
             raise last_exc
         raise RuntimeError("Export POST failed and no fallback job found.")
 
-    def _poll_until_complete(self, endpoint_base: str, job_id: int, rkwargs: Dict) -> None:
+    def _poll_until_complete(
+        self, endpoint_base: str, job_id: int, rkwargs: Dict
+    ) -> None:
         url = f"{endpoint_base}/export/{job_id}"
         deadline = time.time() + int(getattr(C, "export_timeout_seconds", 900) or 900)
         interval = int(getattr(C, "export_poll_interval_seconds", 3) or 3)
@@ -408,9 +593,20 @@ class SurveySolutionsExportSource(DataSource):
             headers.update(rkwargs["headers"])
 
         while time.time() < deadline:
-            r = requests.get(url, headers=headers, timeout=30, **{k: v for k, v in rkwargs.items() if k != "headers"})
+            r = requests.get(
+                url,
+                headers=headers,
+                timeout=30,
+                **{k: v for k, v in rkwargs.items() if k != "headers"},
+            )
             if r.status_code >= 400:
-                LOG.error("Export GET status failed %s %s\nURL=%s\nResp=%s", r.status_code, r.reason, url, r.text[:2000])
+                LOG.error(
+                    "Export GET status failed %s %s\nURL=%s\nResp=%s",
+                    r.status_code,
+                    r.reason,
+                    url,
+                    r.text[:2000],
+                )
                 r.raise_for_status()
             meta = r.json() or {}
             status = (meta.get("ExportStatus") or meta.get("status") or "").lower()
@@ -422,7 +618,9 @@ class SurveySolutionsExportSource(DataSource):
                 raise RuntimeError(f"Export job {job_id} failed: {err}")
             time.sleep(interval)
 
-        raise TimeoutError(f"Export job {job_id} timed out after {getattr(C, 'export_timeout_seconds', 900)}s")
+        raise TimeoutError(
+            f"Export job {job_id} timed out after {getattr(C, 'export_timeout_seconds', 900)}s"
+        )
 
     def _download_zip(self, endpoint_base: str, job_id: int, rkwargs: Dict) -> str:
         url = f"{endpoint_base}/export/{job_id}/file"
@@ -438,7 +636,13 @@ class SurveySolutionsExportSource(DataSource):
                 text = r.text[:2000]
             except Exception:
                 pass
-            LOG.error("Export file GET failed %s %s\nURL=%s\nResp=%s", r.status_code, r.reason, url, text)
+            LOG.error(
+                "Export file GET failed %s %s\nURL=%s\nResp=%s",
+                r.status_code,
+                r.reason,
+                url,
+                text,
+            )
             r.raise_for_status()
 
         with open(path, "wb") as f:
@@ -469,9 +673,17 @@ class SurveySolutionsExportSource(DataSource):
         job_id = self._create_job(
             endpoint_base=endpoint_base,
             questionnaire_id=questionnaire_id,
-            export_format=export_format or getattr(C, "export_format", "Tabular") or "Tabular",
-            interview_status=interview_status or getattr(C, "export_interview_status", "All") or "All",
-            include_meta=include_meta if include_meta is not None else getattr(C, "export_include_meta", None),
+            export_format=export_format
+            or getattr(C, "export_format", "Tabular")
+            or "Tabular",
+            interview_status=interview_status
+            or getattr(C, "export_interview_status", "All")
+            or "All",
+            include_meta=(
+                include_meta
+                if include_meta is not None
+                else getattr(C, "export_include_meta", None)
+            ),
             from_dt=from_dt,
             to_dt=to_dt,
             rkwargs=rkwargs,
@@ -482,7 +694,9 @@ class SurveySolutionsExportSource(DataSource):
         zip_path = self._download_zip(endpoint_base, job_id, rkwargs)
 
         # Resolve include filter (from CLI or config)
-        name_filter = (tab_name_contains or getattr(C, "export_tab_name_contains", "") or "").strip() or None
+        name_filter = (
+            tab_name_contains or getattr(C, "export_tab_name_contains", "") or ""
+        ).strip() or None
 
         # Build the list of .tab basenames that pass include AND do not match exclude list
         selected_tabs: List[str] = []
@@ -496,11 +710,15 @@ class SurveySolutionsExportSource(DataSource):
                     if name_filter and name_filter.lower() not in base.lower():
                         continue
                     if _should_exclude_tab(base):
-                        LOG.info("Skipping tab due to export_exclude_tabs_contains: %s", nm)
+                        LOG.info(
+                            "Skipping tab due to export_exclude_tabs_contains: %s", nm
+                        )
                         continue
                     selected_tabs.append(base)
         except Exception:
-            LOG.exception("Failed to inspect export ZIP for tab selection; falling back to name_filter only.")
+            LOG.exception(
+                "Failed to inspect export ZIP for tab selection; falling back to name_filter only."
+            )
             selected_tabs = []
 
         try:
@@ -512,7 +730,9 @@ class SurveySolutionsExportSource(DataSource):
                         if yield_source_meta:
                             row = dict(row)
                             row["_source"] = {
-                                "workspace": workspace or getattr(C, "export_workspace", "") or "",
+                                "workspace": workspace
+                                or getattr(C, "export_workspace", "")
+                                or "",
                                 "questionnaire_id": questionnaire_id,
                                 "job_id": job_id,
                                 "endpoint": endpoint_base,
@@ -526,7 +746,9 @@ class SurveySolutionsExportSource(DataSource):
                     if yield_source_meta:
                         row = dict(row)
                         row["_source"] = {
-                            "workspace": workspace or getattr(C, "export_workspace", "") or "",
+                            "workspace": workspace
+                            or getattr(C, "export_workspace", "")
+                            or "",
                             "questionnaire_id": questionnaire_id,
                             "job_id": job_id,
                             "endpoint": endpoint_base,
@@ -574,8 +796,12 @@ class SurveySolutionsExportSource(DataSource):
         - 'from_dt'/'to_dt' accept str/datetime/date (normalized via to_datetime_str()).
         """
         endpoint_base = _compose_endpoint_base(
-            base_url=base_url or getattr(self, "base_url", None) or getattr(C, "export_base_url", None),
-            workspace=workspace or getattr(self, "workspace", None) or getattr(C, "export_workspace", None),
+            base_url=base_url
+            or getattr(self, "base_url", None)
+            or getattr(C, "export_base_url", None),
+            workspace=workspace
+            or getattr(self, "workspace", None)
+            or getattr(C, "export_workspace", None),
             api_prefix=(
                 api_prefix
                 or getattr(self, "api_prefix", None)
@@ -603,7 +829,9 @@ class SurveySolutionsExportSource(DataSource):
                 qids = [qid]
 
         if not qids:
-            raise ValueError("At least one questionnaire id is required ('questionnaire_id' or 'questionnaire_ids').")
+            raise ValueError(
+                "At least one questionnaire id is required ('questionnaire_id' or 'questionnaire_ids')."
+            )
 
         for q in qids:
             yield from self._iter_single_qid(
@@ -626,6 +854,10 @@ class SurveySolutionsExportSource(DataSource):
         Accepts same kwargs as 'rows'. For positional convenience:
           - args[0] can be questionnaire_id (if provided).
         """
-        if args and "questionnaire_id" not in kwargs and "questionnaire_ids" not in kwargs:
+        if (
+            args
+            and "questionnaire_id" not in kwargs
+            and "questionnaire_ids" not in kwargs
+        ):
             kwargs["questionnaire_id"] = args[0]
         return self.rows(**kwargs)

@@ -28,7 +28,7 @@ AUTO_INCLUDE_EXTRAS = [
     "group_code",
 ]
 
-# Hard exclude these keys from CSV headers 
+# Hard exclude these keys from CSV headers
 CSV_FIELD_DENYLIST = {"raw", "_source", "phone", "gender", "email"}
 
 
@@ -77,7 +77,11 @@ def _resolve_workflow_arg(user, workflow_cfg):
     if hasattr(workflow_cfg, "run"):
         return workflow_cfg
 
-    if isinstance(workflow_cfg, str) and "." in workflow_cfg and " " not in workflow_cfg:
+    if (
+        isinstance(workflow_cfg, str)
+        and "." in workflow_cfg
+        and " " not in workflow_cfg
+    ):
         mod_path, _, name = workflow_cfg.rpartition(".")
         try:
             mod = importlib.import_module(mod_path)
@@ -93,7 +97,11 @@ def _resolve_workflow_arg(user, workflow_cfg):
             if callable(obj):
                 return _SimpleRunner(obj, name=workflow_cfg)
         except Exception:
-            LOG.debug("Dotted-path workflow resolution failed for '%s'", workflow_cfg, exc_info=True)
+            LOG.debug(
+                "Dotted-path workflow resolution failed for '%s'",
+                workflow_cfg,
+                exc_info=True,
+            )
 
     # 4) “friendly name” mapping (defensive imports)
     if isinstance(workflow_cfg, str):
@@ -136,9 +144,13 @@ def _resolve_workflow_arg(user, workflow_cfg):
         if process_update_individuals_workflow:
             mapping["python update individuals"] = process_update_individuals_workflow
         if process_import_valid_individuals_workflow:
-            mapping["python valid upload individuals"] = process_import_valid_individuals_workflow
+            mapping["python valid upload individuals"] = (
+                process_import_valid_individuals_workflow
+            )
         if process_update_valid_individuals_workflow:
-            mapping["python valid update individuals"] = process_update_valid_individuals_workflow
+            mapping["python valid update individuals"] = (
+                process_update_valid_individuals_workflow
+            )
 
         fn = mapping.get(key)
         if fn:
@@ -149,9 +161,7 @@ def _resolve_workflow_arg(user, workflow_cfg):
         import individual.workflows as W
 
         key = str(workflow_cfg).lower().replace("-", "_")
-        for _, modname, _ in pkgutil.iter_modules(
-            W.__path__, prefix=W.__name__ + "."
-        ):
+        for _, modname, _ in pkgutil.iter_modules(W.__path__, prefix=W.__name__ + "."):
             try:
                 m = importlib.import_module(modname)
             except Exception:
@@ -228,15 +238,11 @@ class IndividualImportSink(DataSink):
             except Exception:
                 LOG.debug("Could not set svc.batch", exc_info=True)
 
-       
         self.lookup_field: str = self.config.get(
             "sink_model_lookup_field", "json_ext__external_id"
         )
-        self.update_existing: bool = bool(
-            self.config.get("sink_update_existing", True)
-        )
+        self.update_existing: bool = bool(self.config.get("sink_update_existing", True))
 
-     
         self.workflow_cfg: Any = self.config.get(
             "sink_workflow", "Python Import Individuals"
         )
@@ -282,17 +288,13 @@ class IndividualImportSink(DataSink):
         for name in ("import_individual", "import_one"):
             if hasattr(self.svc, name):
                 try:
-                    return "single", name, inspect.signature(
-                        getattr(self.svc, name)
-                    )
+                    return "single", name, inspect.signature(getattr(self.svc, name))
                 except Exception:
                     return "single", name, None
         for name in ("import_individuals", "import_bulk"):
             if hasattr(self.svc, name):
                 try:
-                    return "bulk", name, inspect.signature(
-                        getattr(self.svc, name)
-                    )
+                    return "bulk", name, inspect.signature(getattr(self.svc, name))
                 except Exception:
                     return "bulk", name, None
         raise RuntimeError(
@@ -337,9 +339,7 @@ class IndividualImportSink(DataSink):
         """
         model_lookup_field = self.lookup_field
         data_ids = [self._get_data_id(record, model_lookup_field) for record in data]
-        existing_map = self._get_existing_individual_ids(
-            data_ids, model_lookup_field
-        )
+        existing_map = self._get_existing_individual_ids(data_ids, model_lookup_field)
 
         existing_records: List[Dict[str, Any]] = []
         new_records: List[Dict[str, Any]] = []
@@ -364,14 +364,10 @@ class IndividualImportSink(DataSink):
         """
         result = WorkflowService.get_workflows(name, "individual")
         if not result.get("success"):
-            raise DataSink.Error(
-                f"{result.get('message')}: {result.get('details')}"
-            )
+            raise DataSink.Error(f"{result.get('message')}: {result.get('details')}")
         workflows = result.get("data", {}).get("workflows")
         if not workflows:
-            raise DataSink.Error(
-                f"Workflow not found: group=individual name={name}"
-            )
+            raise DataSink.Error(f"Workflow not found: group=individual name={name}")
         if len(workflows) > 1:
             raise DataSink.Error(
                 f"Multiple workflows found: group=individual name={name}"
@@ -380,10 +376,10 @@ class IndividualImportSink(DataSink):
 
     def _resolve_workflow(self, cfg: Any) -> Any:
         """
-         Resolver:
-          1) If cfg is already a dict-like workflow (from WorkflowService), use it.
-          2) If cfg is a string, first try WorkflowService.get_workflows(name).
-          3) If that fails, fall back to Python-based _resolve_workflow_arg.
+        Resolver:
+         1) If cfg is already a dict-like workflow (from WorkflowService), use it.
+         2) If cfg is a string, first try WorkflowService.get_workflows(name).
+         3) If that fails, fall back to Python-based _resolve_workflow_arg.
         """
         # Already a workflow dict from WorkflowService?
         if isinstance(cfg, dict) and "name" in cfg:
@@ -399,7 +395,7 @@ class IndividualImportSink(DataSink):
                     cfg,
                 )
 
-        # Fallback: Python resolution 
+        # Fallback: Python resolution
         return _resolve_workflow_arg(self.user, cfg)
 
     # ---------- CSV helpers  ----------
@@ -419,8 +415,7 @@ class IndividualImportSink(DataSink):
             fields = [
                 k
                 for k, v in sample.items()
-                if (not k.startswith("_"))
-                and not isinstance(v, (dict, list))
+                if (not k.startswith("_")) and not isinstance(v, (dict, list))
             ]
 
         # drop deny-listed keys that can break validation
@@ -486,9 +481,7 @@ class IndividualImportSink(DataSink):
                     return jx
                 if isinstance(jx, dict):
                     try:
-                        return json.dumps(
-                            jx, ensure_ascii=False, separators=(",", ":")
-                        )
+                        return json.dumps(jx, ensure_ascii=False, separators=(",", ":"))
                     except Exception:
                         return ""
                 return ""
@@ -602,9 +595,7 @@ class IndividualImportSink(DataSink):
                 update_wf = self._resolve_workflow(self.update_workflow_cfg)
 
                 try:
-                    upload_result = method(
-                        update_file, update_wf, upd_group_col
-                    )
+                    upload_result = method(update_file, update_wf, upd_group_col)
                     LOG.info(
                         "IndividualImportSink (bulk-file/update) pushed %s existing record(s).",
                         len(existing_records),

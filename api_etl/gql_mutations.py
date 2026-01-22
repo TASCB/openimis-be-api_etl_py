@@ -1,10 +1,13 @@
 import graphene as graphene
 import uuid
 from datetime import datetime
+import logging
 
 from django.utils.translation import gettext as _
 from django.contrib.auth.models import AnonymousUser
 from django.core.exceptions import ValidationError
+
+logger = logging.getLogger(__name__)
 
 from api_etl.utils import (
     get_class_by_name,
@@ -14,6 +17,7 @@ from api_etl.apps import ApiEtlConfig
 from api_etl.models import PulledHistory
 from core.gql.gql_mutations.base_mutation import BaseMutation
 from core.schema import OpenIMISMutation
+from core.utils import set_current_user, clear_current_user
 
 
 class ETLServiceMutation(BaseMutation):
@@ -102,6 +106,7 @@ class PAABasedETLMutation(BaseMutation):
 
     @classmethod
     def _mutate(cls, user, **data):
+        set_current_user(user)
         try:
             data.pop("client_mutation_id", None)
             data.pop("client_mutation_label", None)
@@ -133,9 +138,86 @@ class PAABasedETLMutation(BaseMutation):
             )
 
             try:
+                # VALIDATION: Ensure questionnaire matches selected PAA/district
+                if questionnaire_id and paa_name:
+                    from api_etl.gql_queries import (
+                        _strip_district_suffix,
+                        _extract_district_from_questionnaire,
+                    )
+                    from api_etl.apps import ApiEtlConfig
+                    from api_etl.sources.survey_solutions_export_source import (
+                        SurveySolutionsExportSource,
+                    )
+
+                    # Get questionnaire title from HQ to validate
+                    try:
+                        source = SurveySolutionsExportSource()
+                        source.base_url = getattr(ApiEtlConfig, "export_base_url", "")
+                        source.workspace = getattr(ApiEtlConfig, "export_workspace", "")
+                        source.meta_api_prefix = getattr(
+                            ApiEtlConfig, "meta_api_prefix", "/api/v1"
+                        )
+
+                        questionnaires = source.list_questionnaires()
+                        selected_q = next(
+                            (
+                                q
+                                for q in questionnaires
+                                if q.get("Identity") == questionnaire_id
+                            ),
+                            None,
+                        )
+
+                        if selected_q:
+                            q_title = selected_q.get("Title", "")
+
+                            # Extract district from questionnaire title
+                            suffixes = getattr(
+                                ApiEtlConfig,
+                                "district_name_suffixes",
+                                ["DC", "TC", "MC"],
+                            )
+                            prefix = getattr(
+                                ApiEtlConfig,
+                                "questionnaire_title_prefix",
+                                "DODOSO LA KAYA-RM4-",
+                            )
+
+                            q_district = _extract_district_from_questionnaire(
+                                q_title, prefix
+                            )
+                            q_district_base = _strip_district_suffix(
+                                q_district, suffixes
+                            )
+                            paa_base = _strip_district_suffix(paa_name, suffixes)
+
+                            # Compare base names (case-insensitive)
+                            if q_district_base.upper() != paa_base.upper():
+                                history_record.status = "failed"
+                                history_record.error_message = (
+                                    f"Questionnaire validation failed: "
+                                    f"Selected questionnaire '{q_title}' does not belong to district '{paa_name}'. "
+                                    f"Expected district: '{paa_name}', Found: '{q_district}'"
+                                )
+                                history_record.save(
+                                    username=user.username,
+                                    update_fields=["status", "error_message"],
+                                )
+                                return [
+                                    {
+                                        "message": "api_etl.mutation.questionnaire_mismatch",
+                                        "detail": history_record.error_message,
+                                    }
+                                ]
+                    except Exception as validation_error:
+                        # Log but don't block import if validation fails
+                        logger.error(
+                            f"Questionnaire validation error (non-blocking): {str(validation_error)}"
+                        )
+
                 # Find and execute the Survey Solutions ETL service
                 etl_service_class = get_class_by_name(
-                    ETL_CLASS, "SurveySolutionsService"
+                    ETL_CLASS, "SurveySolutionService"
                 )
                 if not etl_service_class:
                     from api_etl.utils import get_classes_in_module
@@ -161,17 +243,65 @@ class PAABasedETLMutation(BaseMutation):
                 etl_service = etl_service_class(user, config=service_config)
                 result = etl_service.execute()
 
+                # DEBUG: Log result details
+                logger.error(f"=== ETL EXECUTE COMPLETED ===")
+                logger.error(f"Result type: {type(result)}")
+                logger.error(
+                    f"Result keys: {result.keys() if isinstance(result, dict) else 'NOT A DICT'}"
+                )
+                logger.error(
+                    f"Result success: {result.get('success') if isinstance(result, dict) else 'N/A'}"
+                )
+                logger.error(
+                    f"Result detail type: {type(result.get('detail')) if isinstance(result, dict) else 'N/A'}"
+                )
+
                 if result.get("success"):
                     # Update history record with results
+                    logger.error(f"=== STATUS UPDATE STARTING ===")
+                    logger.error(f"History record uuid: {history_record.uuid}")
+
                     history_record.status = "completed"
-                    history_record.update_counts_from_etl_result(result)
+                    logger.error(f"Status set to: {history_record.status}")
+                    logger.error(f"About to call update_counts_from_etl_result")
+
+                    history_record.update_counts_from_etl_result(
+                        result.get("detail", {}),
+                        user=user,  # Pass user for audit logging
+                    )
+                    logger.error(f"update_counts_from_etl_result completed")
+
+                    history_record.refresh_from_db()
+                    logger.error(
+                        f"After refresh_from_db, status={history_record.status}"
+                    )
+
+                    if history_record.status != "completed":
+                        history_record.status = "completed"
+                        history_record.save(
+                            username=user.username, update_fields=["status"]
+                        )
+                        logger.error(f"Did defensive save with update_fields")
+
+                    logger.error(f"=== STATUS UPDATE COMPLETED ===")
+                    logger.error(f"Final status: {history_record.status}")
+                    logger.error(
+                        f"Final household count: {history_record.number_of_households}"
+                    )
                     return None
                 else:
+                    logger.error(f"=== ETL FAILED ===")
+                    logger.error(f"Result was NOT successful")
+                    logger.error(f"Result detail: {result.get('detail', 'NO DETAIL')}")
+
                     history_record.status = "failed"
                     history_record.error_message = result.get(
                         "detail", "ETL execution failed"
                     )
-                    history_record.save()
+                    history_record.save(
+                        username=user.username,
+                        update_fields=["status", "error_message"],
+                    )
 
                     return [
                         {
@@ -184,10 +314,25 @@ class PAABasedETLMutation(BaseMutation):
 
             except Exception as exc:
                 # Update history record with error
+                logger.error(f"=== EXCEPTION IN ETL EXECUTION ===")
+                logger.error(f"Exception type: {type(exc)}")
+                logger.error(f"Exception message: {str(exc)}")
+                import traceback
+
+                logger.error(f"Traceback: {traceback.format_exc()}")
+
                 history_record.status = "failed"
                 history_record.error_message = str(exc)
-                history_record.save()
-                raise exc
+                history_record.save(
+                    username=user.username, update_fields=["status", "error_message"]
+                )
+                # Don't re-raise to avoid transaction rollback
+                return [
+                    {
+                        "message": "api_etl.mutation.failed_to_execute_paa_etl",
+                        "detail": str(exc),
+                    }
+                ]
 
         except Exception as exc:
             return [
@@ -196,3 +341,6 @@ class PAABasedETLMutation(BaseMutation):
                     "detail": str(exc),
                 }
             ]
+        finally:
+            # CLEANUP: Clear current user after mutation completes
+            clear_current_user()

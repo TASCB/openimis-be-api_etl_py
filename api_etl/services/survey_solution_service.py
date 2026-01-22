@@ -20,7 +20,7 @@ from api_etl.adapters.survey_solutions_targeting_adapter import (
     SurveySolutionsTargetingAdapter as Adapter,
 )
 
-# Sink (tolerate older path)
+# Sink
 try:
     from api_etl.sinks.individual_import_sink import IndividualImportSink as Sink
 except Exception:
@@ -34,7 +34,8 @@ from api_etl.utils import data_to_file, get_timestamped_batch_identifier
 LOG = logging.getLogger(__name__)
 
 
-# ----------------------------- PAA Questionnaire Matching Pipeline -----------------------------
+# --------------- PAA Questionnaire Matching Pipeline -----------------------------
+
 
 def _normalize_text(text: str) -> str:
     """
@@ -47,17 +48,17 @@ def _normalize_text(text: str) -> str:
     normalized = text.lower().strip()
 
     # Remove diacritics/accents
-    normalized = unicodedata.normalize('NFD', normalized)
-    normalized = ''.join(c for c in normalized if unicodedata.category(c) != 'Mn')
+    normalized = unicodedata.normalize("NFD", normalized)
+    normalized = "".join(c for c in normalized if unicodedata.category(c) != "Mn")
 
     # Replace multiple spaces/whitespace with single space
-    normalized = re.sub(r'\s+', ' ', normalized)
+    normalized = re.sub(r"\s+", " ", normalized)
 
     # Strip punctuation but keep alphanumeric and spaces
-    normalized = re.sub(r'[^\w\s]', ' ', normalized)
+    normalized = re.sub(r"[^\w\s]", " ", normalized)
 
     # Final cleanup of multiple spaces
-    normalized = re.sub(r'\s+', ' ', normalized).strip()
+    normalized = re.sub(r"\s+", " ", normalized).strip()
 
     return normalized
 
@@ -71,7 +72,7 @@ def _remove_stop_words(text: str, stop_words: List[str]) -> str:
 
     words = text.split()
     filtered_words = [word for word in words if word not in stop_words]
-    return ' '.join(filtered_words)
+    return " ".join(filtered_words)
 
 
 def _extract_code_tokens(text: str) -> List[str]:
@@ -82,7 +83,7 @@ def _extract_code_tokens(text: str) -> List[str]:
         return []
 
     # Find sequences of 4 or more digits
-    code_pattern = r'\b\d{4,}\b'
+    code_pattern = r"\b\d{4,}\b"
     codes = re.findall(code_pattern, text)
     return codes
 
@@ -92,7 +93,7 @@ def _score_questionnaire_match(
     district_name: str,
     district_code: str,
     region_code: str,
-    config: Dict[str, Any]
+    config: Dict[str, Any],
 ) -> Tuple[int, str]:
     """
     Score a questionnaire against PAA criteria.
@@ -105,14 +106,20 @@ def _score_questionnaire_match(
         1 = Name-only match (weak)
         2 = Code-aware match (strong)
         3 = Code+name match (strongest)
+        4 = Suffix match (district name at end after dash)
+        5 = Suffix + code match (strongest)
     """
     title = questionnaire.get("Title", "")
     if not title:
         return 0, "no-title"
 
     # Get configuration
-    stop_words = _cfg_get(config, "questionnaire_matching_stop_words", default=["district", "council"])
-    enable_code_matching = _cfg_get(config, "questionnaire_matching_enable_code_tokens", default=True)
+    stop_words = _cfg_get(
+        config, "questionnaire_matching_stop_words", default=["district", "council"]
+    )
+    enable_code_matching = _cfg_get(
+        config, "questionnaire_matching_enable_code_tokens", default=True
+    )
 
     # Normalize inputs
     normalized_title = _normalize_text(title)
@@ -122,7 +129,9 @@ def _score_questionnaire_match(
     if stop_words:
         stop_words_normalized = [_normalize_text(word) for word in stop_words]
         normalized_title = _remove_stop_words(normalized_title, stop_words_normalized)
-        normalized_district = _remove_stop_words(normalized_district, stop_words_normalized)
+        normalized_district = _remove_stop_words(
+            normalized_district, stop_words_normalized
+        )
 
     # Extract codes from title
     title_codes = _extract_code_tokens(title)
@@ -133,26 +142,67 @@ def _score_questionnaire_match(
 
     if enable_code_matching and district_code:
         # Check if district code (or first 4 digits) appears in title
-        district_prefix = district_code[:4] if len(district_code) >= 4 else district_code
-        has_district_code = any(code.startswith(district_prefix) for code in title_codes)
+        district_prefix = (
+            district_code[:4] if len(district_code) >= 4 else district_code
+        )
+        has_district_code = any(
+            code.startswith(district_prefix) for code in title_codes
+        )
 
     if enable_code_matching and region_code:
         # Check if region code (first 2 digits) appears in title codes
         region_prefix = region_code[:2] if len(region_code) >= 2 else region_code
         has_region_code = any(code.startswith(region_prefix) for code in title_codes)
 
-    # Check for name matches (whole word contains)
+    # Check for SUFFIX match (district name at END of title after last dash)
+    has_suffix_match = False
+    if normalized_district:
+        # Extract the suffix (text after last dash or just the whole title)
+        if "-" in title:
+            suffix = title.split("-")[-1].strip()
+            suffix_normalized = _normalize_text(suffix)
+            # Remove stop words from suffix too
+            if stop_words:
+                stop_words_normalized = [_normalize_text(word) for word in stop_words]
+                suffix_normalized = _remove_stop_words(
+                    suffix_normalized, stop_words_normalized
+                )
+
+            # Check if district name matches the suffix (partial or full match)
+            district_words = normalized_district.split()
+            suffix_words = suffix_normalized.split()
+
+            # Suffix match if:
+            # 1. Any significant district word appears in the suffix, OR
+            # 2. Suffix contains significant part of district name
+            has_suffix_match = any(
+                dword in suffix_normalized or suffix_normalized in dword
+                for dword in district_words
+                if len(dword) > 3  # ignore short words
+            ) or any(
+                sword in normalized_district or normalized_district in sword
+                for sword in suffix_words
+                if len(sword) > 3
+            )
+
+    # Check for general name matches (whole word contains - anywhere in title)
     has_name_match = False
     if normalized_district:
         # Split district name into words and check if all appear in title
         district_words = normalized_district.split()
         if district_words:
             title_words = normalized_title.split()
-            has_name_match = all(any(word in title_word for title_word in title_words)
-                               for word in district_words)
+            has_name_match = all(
+                any(word in title_word for title_word in title_words)
+                for word in district_words
+            )
 
-    # Determine score and strategy
-    if has_district_code and has_name_match:
+    # Determine score and strategy (HIGHER scores are better!)
+    if has_suffix_match and (has_district_code or has_region_code):
+        return 5, "suffix+code"  # Best match: district at end + code
+    elif has_suffix_match:
+        return 4, "suffix-only"  # Strong match: district at end
+    elif has_district_code and has_name_match:
         return 3, "code+name"
     elif has_district_code or has_region_code:
         return 2, "code-aware"
@@ -168,7 +218,7 @@ def find_matching_questionnaire(
     region_code: str,
     source,
     config: Dict[str, Any],
-    manual_questionnaire_id: Optional[str] = None
+    manual_questionnaire_id: Optional[str] = None,
 ) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
     """
     Find the best matching questionnaire for a PAA (District).
@@ -190,7 +240,7 @@ def find_matching_questionnaire(
             "questionnaire_version": None,
             "matching_strategy": "manual-override",
             "candidates_count": 0,
-            "error": None
+            "error": None,
         }
 
     try:
@@ -203,7 +253,7 @@ def find_matching_questionnaire(
                 "questionnaire_version": None,
                 "matching_strategy": None,
                 "candidates_count": 0,
-                "error": "No questionnaires found in HQ"
+                "error": "No questionnaires found in HQ",
             }
 
         # Score all questionnaires
@@ -221,15 +271,19 @@ def find_matching_questionnaire(
                 "questionnaire_version": None,
                 "matching_strategy": None,
                 "candidates_count": len(questionnaires),
-                "error": f"No questionnaire found for PAA '{district_name} ({district_code})'"
+                "error": f"No questionnaire found for PAA '{district_name} ({district_code})'",
             }
 
         # Sort by score (highest first), then by version (latest first), then by last modified
-        scored_questionnaires.sort(key=lambda x: (
-            -x[0],  # Higher score first
-            -int(x[2].get("Version", 0) or 0),  # Higher version first
-            -(x[2].get("LastEntryDate") or "")  # More recent first (string comparison)
-        ))
+        scored_questionnaires.sort(
+            key=lambda x: (
+                -x[0],  # Higher score first
+                -int(x[2].get("Version", 0) or 0),  # Higher version first
+                -(
+                    x[2].get("LastEntryDate") or ""
+                ),  # More recent first (string comparison)
+            )
+        )
 
         # Take the best match
         best_score, best_strategy, best_questionnaire = scored_questionnaires[0]
@@ -246,17 +300,21 @@ def find_matching_questionnaire(
             "questionnaire_version": best_questionnaire.get("Version"),
             "matching_strategy": best_strategy,
             "candidates_count": len(scored_questionnaires),
-            "error": None
+            "error": None,
         }
 
     except Exception as e:
-        LOG.exception("Failed to find matching questionnaire for PAA %s (%s)", district_name, district_code)
+        LOG.exception(
+            "Failed to find matching questionnaire for PAA %s (%s)",
+            district_name,
+            district_code,
+        )
         return None, {
             "questionnaire_title": None,
             "questionnaire_version": None,
             "matching_strategy": None,
             "candidates_count": 0,
-            "error": str(e)
+            "error": str(e),
         }
 
 
@@ -285,8 +343,6 @@ class SurveySolutionService(_BaseService):
     Survey Solutions Export API → Adapter → (optional PMT) → Sink
 
     - Robust mapping from config → Source (base_url, workspace, api_prefix, meta_api_prefix, basic auth)
-    - Supports either Source.pull(...) or Source.rows(...)
-    - Never passes unknown kwargs like 'auth' into Source methods (we set session auth instead)
     - Merges HH header rows with roster rows into per-person rows before adapting
     """
 
@@ -332,7 +388,9 @@ class SurveySolutionService(_BaseService):
                 _bool(_cfg_get(self.config, "export_reuse_latest_on_5xx"), False),
             )
         except Exception:
-            LOG.exception("Failed to set reuse_latest_completed on Source; continuing with defaults")
+            LOG.exception(
+                "Failed to set reuse_latest_completed on Source; continuing with defaults"
+            )
 
     # ----------------------------- helpers -----------------------------
 
@@ -370,6 +428,7 @@ class SurveySolutionService(_BaseService):
             sess = getattr(src, "session", None) or getattr(src, "_session", None)
             if sess is None:
                 import requests
+
                 sess = requests.Session()
                 try:
                     setattr(src, "session", sess)
@@ -390,9 +449,12 @@ class SurveySolutionService(_BaseService):
                 p = _cfg_get(cfg, "auth_basic_password")
                 if u or p:
                     import requests
+
                     sess.auth = requests.auth.HTTPBasicAuth(u or "", p or "")
         except Exception:
-            LOG.exception("Failed to wire Source session/auth; continuing with defaults")
+            LOG.exception(
+                "Failed to wire Source session/auth; continuing with defaults"
+            )
 
     def _maybe_map_gender(self, g: Any) -> Any:
         try:
@@ -444,11 +506,16 @@ class SurveySolutionService(_BaseService):
 
         # Strong hints = person row
         strong = {
-            "firstname", "first_name",
-            "lastname", "last_name",
-            "dob", "dateofbirth",
-            "relationshiptohead", "relationship_to_head",
-            "sex", "gender",
+            "firstname",
+            "first_name",
+            "lastname",
+            "last_name",
+            "dob",
+            "dateofbirth",
+            "relationshiptohead",
+            "relationship_to_head",
+            "sex",
+            "gender",
         }
         if keys & strong:
             return True
@@ -463,9 +530,9 @@ class SurveySolutionService(_BaseService):
 
         return False
 
-
-
-    def _merge_household_roster(self, all_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _merge_household_roster(
+        self, all_rows: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
         """
         Merge household header rows with person roster rows using interview key.
 
@@ -473,7 +540,9 @@ class SurveySolutionService(_BaseService):
         - Selects the richest household row
         - Combines each person row with its matching HH row
         """
-        bucket: DefaultDict[str, Dict[str, Any]] = defaultdict(lambda: {"hh": None, "persons": []})
+        bucket: DefaultDict[str, Dict[str, Any]] = defaultdict(
+            lambda: {"hh": None, "persons": []}
+        )
 
         def richness(d: Dict[str, Any]) -> int:
             """Count number of non-empty scalar fields."""
@@ -489,7 +558,6 @@ class SurveySolutionService(_BaseService):
 
         for r in all_rows:
 
-          
             # 1. SKIP METADATA / NON-DATA TABS
             src_name = r.get("_source", "")
             if isinstance(src_name, str) and (
@@ -503,8 +571,7 @@ class SurveySolutionService(_BaseService):
             ik = self._extract_interview_key(r)
             if not ik:
                 LOG.debug(
-                    "Row without Interview Key skipped: keys=%s",
-                    list(r.keys())[:10]
+                    "Row without Interview Key skipped: keys=%s", list(r.keys())[:10]
                 )
                 continue
 
@@ -516,7 +583,6 @@ class SurveySolutionService(_BaseService):
                 # Pick the richest HH row
                 if hh is None or richness(r) > richness(hh):
                     bucket[ik]["hh"] = r
-
 
         # 4. Combine HH row + each person row
 
@@ -539,7 +605,6 @@ class SurveySolutionService(_BaseService):
 
         return merged
 
-
     def build_preview_payload(self, records, source_name=None):
         """Return a UI-safe preview (scalars only) to avoid React errors on dict/list values."""
         from individual.apps import IndividualConfig  # safe import
@@ -547,7 +612,15 @@ class SurveySolutionService(_BaseService):
         preview_fields = getattr(
             IndividualConfig,
             "workflow_preview_fields",
-            ["first_name", "last_name", "dob", "location_code", "pmt_score", "pmt_class", "external_id"],
+            [
+                "first_name",
+                "last_name",
+                "dob",
+                "location_code",
+                "pmt_score",
+                "pmt_class",
+                "external_id",
+            ],
         )
 
         preview_records = []
@@ -558,7 +631,9 @@ class SurveySolutionService(_BaseService):
                 if isinstance(val, (str, int, float, bool)) or val is None:
                     row[field] = val
                 elif isinstance(val, (list, dict)):
-                    row[field] = f"[{type(val).__name__}]"  # don’t send objects to React table
+                    row[field] = (
+                        f"[{type(val).__name__}]"  # don’t send objects to React table
+                    )
                 else:
                     row[field] = str(val) if val is not None else None
             row["_source"] = source_name
@@ -578,7 +653,7 @@ class SurveySolutionService(_BaseService):
         questionnaire_id: Optional[str] = None,
         questionnaire_ids: Optional[List[str]] = None,
         tab_name_contains: Optional[str] = None,  # legacy name
-        tab_filter: Optional[str] = None,         # preferred name
+        tab_filter: Optional[str] = None,  # preferred name
         include_meta: bool = False,
         from_dt: Optional[Any] = None,
         to_dt: Optional[Any] = None,
@@ -606,11 +681,12 @@ class SurveySolutionService(_BaseService):
                 if q:
                     qids = [q]
         if not qids:
-            raise ValueError("No questionnaire id(s). Provide questionnaire_id / questionnaire_ids or set them in ApiEtlConfig.")
+            raise ValueError(
+                "No questionnaire id(s). Provide questionnaire_id / questionnaire_ids or set them in ApiEtlConfig."
+            )
 
-        # -------------------------
         # TAB FILTERING (fixed logic)
-        # -------------------------
+
         # 1. CLI flag --tab always overrides
         if tab_filter:
             effective_tab = tab_filter.strip()
@@ -624,33 +700,53 @@ class SurveySolutionService(_BaseService):
             #   Load all .tab survey data EXCEPT interview__, export__, assignment__ files
             effective_tab = None  # Means "no filter" at source level
 
-
         include_meta = bool(cfg.get("export_include_meta", include_meta))
 
         # Build Source *attributes* from overrides (do not pass unknown kwargs to .pull/.rows)
-        base_url = source_overrides.get("base_url") or _cfg_get(cfg, "export_base_url", "base_url")
-        workspace = source_overrides.get("workspace") or _cfg_get(cfg, "export_workspace", "workspace")
+        base_url = source_overrides.get("base_url") or _cfg_get(
+            cfg, "export_base_url", "base_url"
+        )
+        workspace = source_overrides.get("workspace") or _cfg_get(
+            cfg, "export_workspace", "workspace"
+        )
         if base_url:
             try:
                 setattr(self.source, "base_url", base_url)
             except Exception:
-                LOG.debug("Could not override Source.base_url to %r", base_url, exc_info=True)
+                LOG.debug(
+                    "Could not override Source.base_url to %r", base_url, exc_info=True
+                )
         if workspace:
             try:
                 setattr(self.source, "workspace", workspace)
             except Exception:
-                LOG.debug("Could not override Source.workspace to %r", workspace, exc_info=True)
+                LOG.debug(
+                    "Could not override Source.workspace to %r",
+                    workspace,
+                    exc_info=True,
+                )
             # refresh header if session exists
             try:
-                sess = getattr(self.source, "session", None) or getattr(self.source, "_session", None)
+                sess = getattr(self.source, "session", None) or getattr(
+                    self.source, "_session", None
+                )
                 if sess and isinstance(getattr(sess, "headers", {}), dict):
                     sess.headers["X-Workspace"] = str(workspace)
             except Exception:
-                LOG.debug("Failed to refresh X-Workspace header for workspace=%r", workspace, exc_info=True)
+                LOG.debug(
+                    "Failed to refresh X-Workspace header for workspace=%r",
+                    workspace,
+                    exc_info=True,
+                )
 
         LOG.info(
             "SurveySolutionService.run starting: qids=%s, tab_filter=%r, include_meta=%s, base_url=%r, workspace=%r, dry_run=%s",
-            qids, effective_tab, include_meta, base_url, workspace, dry_run,
+            qids,
+            effective_tab,
+            include_meta,
+            base_url,
+            workspace,
+            dry_run,
         )
 
         # Prepare call into Source (support either .pull or .rows)
@@ -667,7 +763,6 @@ class SurveySolutionService(_BaseService):
             to_dt=to_dt,
         )
 
-        # Remove Nones for nicer logs
         pull_args = {k: v for k, v in pull_args.items() if v not in (None, "")}
 
         LOG.debug("Source call args: %s", pull_args)
@@ -695,7 +790,8 @@ class SurveySolutionService(_BaseService):
 
         LOG.info(
             "SurveySolutionService: roster merge produced %s merged person row(s) from %s raw row(s)",
-            total_merged, total_raw,
+            total_merged,
+            total_raw,
         )
         if total_raw and not total_merged:
             sample_keys = list(all_raw[0].keys())[:20] if all_raw else []
@@ -724,7 +820,8 @@ class SurveySolutionService(_BaseService):
             if not isinstance(x, dict):
                 LOG.warning(
                     "Adapter.transform returned non-dict for record #%s (type=%s); skipping",
-                    idx, type(x),
+                    idx,
+                    type(x),
                 )
                 continue
 
@@ -740,11 +837,15 @@ class SurveySolutionService(_BaseService):
 
         total_xform = len(transformed)
         if total_xform == 0:
-            LOG.error("No transformed rows. Likely no person rows matched. Check _is_person_row() and tab filtering.")
+            LOG.error(
+                "No transformed rows. Likely no person rows matched. Check _is_person_row() and tab filtering."
+            )
 
         LOG.info(
             "SurveySolutionService: transformed %s row(s) (after roster merge %s → transformed %s).",
-            total_xform, total_merged, total_xform,
+            total_xform,
+            total_merged,
+            total_xform,
         )
 
         # PMT enrichment (config default OR flag)
@@ -756,7 +857,9 @@ class SurveySolutionService(_BaseService):
             except Exception:
                 LOG.exception("PMT enrichment failed; continuing without PMT.")
         elif do_enrich and not transformed:
-            LOG.info("PMT enrichment enabled but there are no transformed rows; skipping enrichment step.")
+            LOG.info(
+                "PMT enrichment enabled but there are no transformed rows; skipping enrichment step."
+            )
 
         # Push (chunked) if sink available and not dry-run
         batch_id = get_timestamped_batch_identifier(prefix="ss_individuals_")
@@ -767,8 +870,10 @@ class SurveySolutionService(_BaseService):
                 total_pushed = len(transformed)
             else:
                 for i in range(0, len(transformed), self.batch_size):
-                    self.sink.push(transformed[i:i + self.batch_size], batch_identifier=batch_id)
-                    total_pushed += len(transformed[i:i + self.batch_size])
+                    self.sink.push(
+                        transformed[i : i + self.batch_size], batch_identifier=batch_id
+                    )
+                    total_pushed += len(transformed[i : i + self.batch_size])
 
         summary = {
             "questionnaires": qids,
@@ -782,13 +887,24 @@ class SurveySolutionService(_BaseService):
             "pmt_enriched": bool(do_enrich),
         }
 
-        file_obj = self._summary_file(transformed, identifier=batch_id) if (yield_csv and transformed) else None
+        file_obj = (
+            self._summary_file(transformed, identifier=batch_id)
+            if (yield_csv and transformed)
+            else None
+        )
 
         # UI-safe preview (no nested objects)
-        preview = self.build_preview_payload(transformed, source_name="survey_solutions")
+        preview = self.build_preview_payload(
+            transformed, source_name="survey_solutions"
+        )
 
         LOG.info("SurveySolutionService finished: %s", summary)
-        return {"summary": summary, "rows": transformed, "file": file_obj, "preview": preview}
+        return {
+            "summary": summary,
+            "rows": transformed,
+            "file": file_obj,
+            "preview": preview,
+        }
 
     def run_paa_based_etl(
         self,
@@ -798,8 +914,8 @@ class SurveySolutionService(_BaseService):
         region_code: str,
         manual_questionnaire_id: Optional[str] = None,
         dry_run: bool = False,
-        user = None,
-        **run_kwargs
+        user=None,
+        **run_kwargs,
     ) -> Dict[str, Any]:
         """
         Run PAA-based ETL: find questionnaire by district/region, then run ETL.
@@ -832,7 +948,7 @@ class SurveySolutionService(_BaseService):
             region_code=region_code,
             source=self.source,
             config=cfg,
-            manual_questionnaire_id=manual_questionnaire_id
+            manual_questionnaire_id=manual_questionnaire_id,
         )
 
         result = {
@@ -841,11 +957,11 @@ class SurveySolutionService(_BaseService):
                 "district_code": district_code,
                 "region_code": region_code,
                 "questionnaire_id": questionnaire_id,
-                **match_info
+                **match_info,
             },
             "etl_result": None,
             "pulled_history_id": None,
-            "error": None
+            "error": None,
         }
 
         if not questionnaire_id:
@@ -861,12 +977,14 @@ class SurveySolutionService(_BaseService):
                         region_code=region_code,
                         questionnaire_match=match_info,
                         user=user,
-                        status='failed',
-                        error_message=error_msg
+                        status="failed",
+                        error_message=error_msg,
                     )
                     result["pulled_history_id"] = history.id
                 except Exception as e:
-                    LOG.warning("Failed to create PulledHistory record for failed run: %s", e)
+                    LOG.warning(
+                        "Failed to create PulledHistory record for failed run: %s", e
+                    )
 
             return result
 
@@ -880,7 +998,7 @@ class SurveySolutionService(_BaseService):
                     region_code=region_code,
                     questionnaire_match=match_info,
                     user=user,
-                    status='running'
+                    status="running",
                 )
                 result["pulled_history_id"] = history.id
             except Exception as e:
@@ -889,9 +1007,7 @@ class SurveySolutionService(_BaseService):
         try:
             # Run ETL with the found questionnaire
             etl_result = self.run(
-                questionnaire_id=questionnaire_id,
-                dry_run=dry_run,
-                **run_kwargs
+                questionnaire_id=questionnaire_id, dry_run=dry_run, **run_kwargs
             )
 
             result["etl_result"] = etl_result
@@ -900,16 +1016,20 @@ class SurveySolutionService(_BaseService):
             if history and not dry_run:
                 try:
                     history.update_counts_from_etl_result(etl_result)
-                    history.status = 'completed'
+                    history.status = "completed"
 
                     # Extract export metadata if available
-                    summary = etl_result.get('summary', {})
-                    if 'batch_identifier' in summary:
-                        history.run_metadata['batch_identifier'] = summary['batch_identifier']
+                    summary = etl_result.get("summary", {})
+                    if "batch_identifier" in summary:
+                        history.run_metadata["batch_identifier"] = summary[
+                            "batch_identifier"
+                        ]
 
                     history.save()
                 except Exception as e:
-                    LOG.warning("Failed to update PulledHistory record with results: %s", e)
+                    LOG.warning(
+                        "Failed to update PulledHistory record with results: %s", e
+                    )
 
             # Log the successful run
             LOG.info(
@@ -918,24 +1038,29 @@ class SurveySolutionService(_BaseService):
                 district_code,
                 questionnaire_id,
                 match_info.get("matching_strategy"),
-                etl_result.get("summary", {}).get("rows_transformed", 0)
+                etl_result.get("summary", {}).get("rows_transformed", 0),
             )
 
         except Exception as e:
             LOG.exception(
                 "PAA-based ETL failed: PAA=%s (%s), questionnaire=%s",
-                district_name, district_code, questionnaire_id
+                district_name,
+                district_code,
+                questionnaire_id,
             )
             result["error"] = str(e)
 
             # Update history record with error
             if history and not dry_run:
                 try:
-                    history.status = 'failed'
+                    history.status = "failed"
                     history.error_message = str(e)
                     history.save()
                 except Exception as update_error:
-                    LOG.warning("Failed to update PulledHistory record with error: %s", update_error)
+                    LOG.warning(
+                        "Failed to update PulledHistory record with error: %s",
+                        update_error,
+                    )
 
         return result
 

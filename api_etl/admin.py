@@ -1,14 +1,13 @@
-
 from django.contrib import admin, messages
 from django.contrib.admin.sites import AlreadyRegistered
 from .models import SurveySolutionsConfig
 
 
 def _get_source():
-    """
-    Lazy import so Admin keeps loading even if source module has issues.
-    """
-    from api_etl.sources.survey_solutions_export_source import SurveySolutionsExportSource
+    from api_etl.sources.survey_solutions_export_source import (
+        SurveySolutionsExportSource,
+    )
+
     return SurveySolutionsExportSource()
 
 
@@ -17,7 +16,7 @@ class SurveySolutionsConfigAdmin(admin.ModelAdmin):
         "name",
         "hq_url",
         "questionnaire_id",
-        "questionnaire_title",   # cached title
+        "questionnaire_title",  # cached title
         "is_active",
         "updated_at",
     )
@@ -129,5 +128,5 @@ for module_path, attr in _CANDIDATE_SITES:
             except AlreadyRegistered:
                 pass
     except Exception:
-      
+
         continue

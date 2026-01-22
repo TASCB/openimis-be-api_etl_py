@@ -11,9 +11,9 @@ from api_etl.gql_queries import (
     ETLServicesListGQLType,
     PulledHistoryGQLType,
     PulledQuestionnaireGQLType,
-    QuestionnaireGQLType,  # NEW
+    QuestionnaireGQLType,
     resolve_pulled_questionnaires,
-    resolve_available_questionnaires,  # NEW
+    resolve_available_questionnaires,
 )
 from api_etl.gql_mutations import ETLServiceMutation, PAABasedETLMutation
 from api_etl.models import PulledHistory

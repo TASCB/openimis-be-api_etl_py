@@ -5,6 +5,88 @@ from individual.models import Individual
 from .models import PulledHistory
 
 
+def _strip_district_suffix(district_name, suffixes=None):
+    """
+    Strip common district suffixes (DC, TC, MC) from district name.
+    Handles both with and without spaces before suffix.
+
+    Args:
+        district_name: District name (e.g., "KILOLODC", "Kilolo DC", "KILOLO")
+        suffixes: List of suffixes to strip (default: ["DC", "TC", "MC"])
+
+    Returns:
+        Base district name without suffix (e.g., "KILOLO")
+
+    Examples:
+        "KILOLODC" -> "KILOLO"
+        "Kilolo DC" -> "KILOLO"  (with space)
+        "KILOLOTC" -> "KILOLO"
+        "KILOLO" -> "KILOLO"
+        "Morogoro MC" -> "MOROGORO"  (with space)
+    """
+    if not district_name:
+        return ""
+
+    if suffixes is None:
+        from api_etl.apps import ApiEtlConfig
+
+        suffixes = getattr(ApiEtlConfig, "district_name_suffixes", ["DC", "TC", "MC"])
+
+    district_upper = district_name.upper().strip()
+
+    # Try to strip each suffix (with or without space)
+    for suffix in suffixes:
+        suffix_upper = suffix.upper()
+
+        # Try with space first: "MOROGORO MC" -> "MOROGORO"
+        if district_upper.endswith(" " + suffix_upper):
+            return district_upper[: -(len(suffix_upper) + 1)].strip()
+
+        # Try without space: "MOROGOROMC" -> "MOROGORO"
+        elif district_upper.endswith(suffix_upper):
+            return district_upper[: -len(suffix_upper)].strip()
+
+    return district_upper
+
+
+def _extract_district_from_questionnaire(questionnaire_title, prefix=None):
+    """
+    Extract district name from questionnaire title.
+
+    Args:
+        questionnaire_title: Full questionnaire title (e.g., "DODOSO LA KAYA-RM4_KILOLODC")
+        prefix: Expected prefix to strip (default: from config)
+
+    Returns:
+        District name extracted from title (e.g., "KILOLODC")
+
+    Examples:
+        "DODOSO LA KAYA-RM4_KILOLODC" -> "KILOLODC"
+        "DODOSO LA KAYA-RM4_KILOLO" -> "KILOLO"
+    """
+    if not questionnaire_title:
+        return ""
+
+    if prefix is None:
+        from api_etl.apps import ApiEtlConfig
+
+        prefix = getattr(
+            ApiEtlConfig, "questionnaire_title_prefix", "DODOSO LA KAYA-RM4_"
+        )
+
+    # Remove prefix if present
+    if prefix and questionnaire_title.startswith(prefix):
+        return questionnaire_title[len(prefix) :].strip()
+
+    # Fallback: extract text after last underscore or dash
+    if "_" in questionnaire_title:
+        return questionnaire_title.split("_")[-1].strip()
+    elif "-" in questionnaire_title:
+        return questionnaire_title.split("-")[-1].strip()
+
+    return questionnaire_title.strip()
+
+
 class ETLServicesGQLType(graphene.ObjectType):
     name_of_service = graphene.String()
 
@@ -30,6 +112,8 @@ class PulledQuestionnaireGQLType(graphene.ObjectType):
     paa_name = graphene.String()
     number_of_households = graphene.Int()
     date_pulled = graphene.DateTime()
+    status = graphene.String()  # running, completed, failed, cancelled
+    error_message = graphene.String()  # error details if failed
 
 
 def resolve_pulled_questionnaires(info, **kwargs):
@@ -63,6 +147,8 @@ def resolve_pulled_questionnaires(info, **kwargs):
                 paa_name=record.paa_name,
                 number_of_households=record.number_of_households,
                 date_pulled=record.date_pulled,
+                status=record.status,
+                error_message=record.error_message,
             )
         )
 
@@ -114,6 +200,8 @@ def _get_fallback_pulled_questionnaires(region_code=None, district_code=None):
                 paa_name=data["paa_name"],
                 number_of_households=len(data["group_codes"]),
                 date_pulled=data["date_created"],
+                status="completed",
+                error_message=None,
             )
         )
 
@@ -154,41 +242,60 @@ def _filter_questionnaires_by_paa(
     questionnaires, district_name=None, district_code=None, region_code=None
 ):
     """
-    Filter and score questionnaires by PAA criteria.
+    Filter and score questionnaires by PAA criteria with SUFFIX-AWARE matching.
 
-    Uses the same scoring logic as find_matching_questionnaire() but returns
-    ALL matches with scores, not just the best one.
-
-    Args:
-        questionnaires: List of questionnaire dicts from HQ
-        district_name: District/PAA display name (e.g., "Iringa DC")
-        district_code: District code (e.g., "0504")
-        region_code: Region code (e.g., "05")
-
-    Returns:
-        List of questionnaires with matching_score and matching_strategy added
+    Scoring:
+        100: Exact match (KILOLODC == KILOLODC)
+        90:  Base match with different suffix / no suffix (KILOLODC matches KILOLOTC/KILOLO)
+        50:  Partial base match (substring)
+        0:   No match (kept when showAll=True; removed later when showAll=False)
     """
-    from api_etl.services.survey_solution_service import (
-        _normalize_text,
-        _remove_stop_words,
-        _extract_code_tokens,
-        _cfg_get,
-    )
+    from api_etl.services.survey_solution_service import _normalize_text
     from api_etl.apps import ApiEtlConfig as C
+    import logging
+    from datetime import datetime
+
+    LOG = logging.getLogger(__name__)
 
     if not questionnaires:
         return []
 
-    # Get config for matching
-    config = C.__dict__
-    stop_words = _cfg_get(
-        config, "questionnaire_matching_stop_words", default=["district", "council"]
-    )
-    enable_code_matching = _cfg_get(
-        config, "questionnaire_matching_enable_code_tokens", default=True
-    )
+    # Config
+    suffixes = getattr(C, "district_name_suffixes", ["DC", "TC", "MC"])
+    prefix = getattr(C, "questionnaire_title_prefix", "DODOSO LA KAYA-RM4_")
 
-    # Score each questionnaire
+    LOG.error("=== MATCHING ALGORITHM DEBUG ===")
+    LOG.error(f"Config - suffixes: {suffixes}")
+    LOG.error(f"Config - prefix: {prefix}")
+    LOG.error(f"Input - district_name: {district_name}")
+
+    def _safe_ts(v):
+        """
+        Convert LastEntryDate to a comparable timestamp (int).
+        Handles ISO strings like '2026-01-19T08:55:10Z' safely.
+        """
+        if not v:
+            return 0
+        if isinstance(v, datetime):
+            return int(v.timestamp())
+        if isinstance(v, str):
+            try:
+                vv = v.replace("Z", "+00:00")
+                return int(datetime.fromisoformat(vv).timestamp())
+            except Exception:
+                return 0
+        return 0
+
+    # Base district name (strip suffix)
+    district_base = (
+        _strip_district_suffix(district_name, suffixes) if district_name else ""
+    )
+    district_normalized = _normalize_text(district_name) if district_name else ""
+    district_base_normalized = _normalize_text(district_base) if district_base else ""
+
+    LOG.error(f"Base district name (after stripping suffix): {district_base}")
+    LOG.error(f"Normalized district name: {district_normalized}")
+
     scored_questionnaires = []
 
     for q in questionnaires:
@@ -196,81 +303,56 @@ def _filter_questionnaires_by_paa(
         if not title:
             continue
 
+        # Extract district name from questionnaire title
+        q_district = _extract_district_from_questionnaire(title, prefix)
+
+        # Base district extracted from questionnaire (strip suffix)
+        q_district_base = _strip_district_suffix(q_district, suffixes)
+
         # Normalize
-        normalized_title = _normalize_text(title)
-        normalized_district = _normalize_text(district_name) if district_name else ""
+        q_district_normalized = _normalize_text(q_district)
+        q_district_base_normalized = _normalize_text(q_district_base)
 
-        # Remove stop words
-        if stop_words:
-            stop_words_normalized = [_normalize_text(word) for word in stop_words]
-            normalized_title = _remove_stop_words(
-                normalized_title, stop_words_normalized
-            )
-            if normalized_district:
-                normalized_district = _remove_stop_words(
-                    normalized_district, stop_words_normalized
-                )
-
-        # Extract codes from title
-        title_codes = _extract_code_tokens(title)
-
-        # Check code matches
-        has_district_code = False
-        has_region_code = False
-
-        if enable_code_matching and district_code:
-            district_prefix = (
-                district_code[:4] if len(district_code) >= 4 else district_code
-            )
-            has_district_code = any(
-                code.startswith(district_prefix) for code in title_codes
-            )
-
-        if enable_code_matching and region_code:
-            region_prefix = region_code[:2] if len(region_code) >= 2 else region_code
-            has_region_code = any(
-                code.startswith(region_prefix) for code in title_codes
-            )
-
-        # Check name match
-        has_name_match = False
-        if normalized_district:
-            district_words = normalized_district.split()
-            if district_words:
-                title_words = normalized_title.split()
-                # At least one word must match
-                has_name_match = any(
-                    any(dword in tword for tword in title_words)
-                    for dword in district_words
-                )
-
-        # Calculate score and strategy
         score = 0
         strategy = "no-match"
 
-        if has_district_code and has_name_match:
-            score = 3
-            strategy = "code+name"
-        elif has_district_code or has_region_code:
-            score = 2
-            strategy = "code-aware"
-        elif has_name_match:
-            score = 1
-            strategy = "name-only"
+        if not district_name:
+            score = 50
+            strategy = "no-filter"
+        elif q_district_normalized == district_normalized:
+            score = 100
+            strategy = "exact-match"
+        elif q_district_base_normalized == district_base_normalized:
+            score = 90
+            strategy = "base-match"
+        elif (
+            district_base_normalized
+            and district_base_normalized in q_district_base_normalized
+        ):
+            score = 50
+            strategy = "partial-match"
 
-        # Add to results even if score is 0 (for "show all" option)
-        q_with_score = dict(q)  # Copy
+        # Debug log (first few or any match)
+        if len(scored_questionnaires) < 5 or score > 0:
+            LOG.error(
+                f"  Q: '{title}' | Extracted: '{q_district}' | Base: '{q_district_base}' "
+                f"| Score: {score} | Strategy: {strategy}"
+            )
+
+        # ALWAYS append (so showAll=True can show score=0 items)
+        q_with_score = dict(q)
         q_with_score["matching_score"] = score
         q_with_score["matching_strategy"] = strategy
         scored_questionnaires.append(q_with_score)
 
-    # Sort by score (highest first), then version (latest first)
+    # Sort ONCE after the loop
     scored_questionnaires.sort(
         key=lambda x: (
-            -x["matching_score"],
-            -int(x.get("Version", 0) or 0),
-            -(x.get("LastEntryDate") or ""),
-        )
+            x.get("matching_score", 0),
+            int(x.get("Version", 0) or 0),
+            _safe_ts(x.get("LastEntryDate")),
+        ),
+        reverse=True,
     )
 
     return scored_questionnaires
@@ -283,10 +365,10 @@ def resolve_available_questionnaires(info, **kwargs):
     Optionally filters by PAA (district) if districtCode/regionCode provided.
 
     Args:
-        districtCode (optional): Filter by district code
-        regionCode (optional): Filter by region code
-        districtName (optional): District display name for name matching
-        showAll (optional): If True, show all questionnaires even with score=0
+        district_code (optional): Filter by district code
+        region_code (optional): Filter by region code
+        district_name (optional): District display name for name matching
+        show_all (optional): If True, show all questionnaires even with score=0
 
     Returns:
         List[QuestionnaireGQLType]: Questionnaires from HQ, scored and sorted
@@ -299,11 +381,19 @@ def resolve_available_questionnaires(info, **kwargs):
 
     LOG = logging.getLogger(__name__)
 
-    # Extract filter params
-    district_code = kwargs.get("districtCode")
-    region_code = kwargs.get("regionCode")
-    district_name = kwargs.get("districtName")
-    show_all = kwargs.get("showAll", False)
+    # Extract filter params - try multiple parameter name formats
+    district_code = kwargs.get("district_code") or kwargs.get("districtCode")
+    region_code = kwargs.get("region_code") or kwargs.get("regionCode")
+    district_name = kwargs.get("district_name") or kwargs.get("districtName")
+    show_all = kwargs.get("show_all", False) or kwargs.get("showAll", False)
+
+    # DEBUG: Log ALL received parameters
+    LOG.error(f"=== QUESTIONNAIRE FILTER DEBUG ===")
+    LOG.error(f"All kwargs received: {kwargs}")
+    LOG.error(f"Extracted - district_code: {district_code}")
+    LOG.error(f"Extracted - region_code: {region_code}")
+    LOG.error(f"Extracted - district_name: {district_name}")
+    LOG.error(f"Extracted - show_all: {show_all}")
 
     # Create and configure source
     source = SurveySolutionsExportSource()
@@ -330,6 +420,11 @@ def resolve_available_questionnaires(info, **kwargs):
 
         # Filter and score by PAA if criteria provided
         if district_code or region_code or district_name:
+            LOG.error(f"=== APPLYING FILTER ===")
+            LOG.error(
+                f"Filter criteria: district_code={district_code}, region_code={region_code}, district_name={district_name}"
+            )
+
             questionnaires = _filter_questionnaires_by_paa(
                 questionnaires,
                 district_name=district_name,
@@ -337,17 +432,26 @@ def resolve_available_questionnaires(info, **kwargs):
                 region_code=region_code,
             )
 
+            LOG.error(f"After filtering: {len(questionnaires)} questionnaires")
+
             # Filter out non-matches unless showAll is True
             if not show_all:
+                original_count = len(questionnaires)
                 questionnaires = [
                     q for q in questionnaires if q.get("matching_score", 0) > 0
                 ]
+                LOG.error(
+                    f"After removing score=0: {len(questionnaires)} questionnaires (removed {original_count - len(questionnaires)})"
+                )
 
             LOG.info(
                 "After PAA filtering: %d questionnaires (showAll=%s)",
                 len(questionnaires),
                 show_all,
             )
+        else:
+            LOG.error(f"=== NO FILTER APPLIED (no criteria provided) ===")
+            LOG.error(f"Returning all {len(questionnaires)} questionnaires")
 
     except Exception as e:
         LOG.exception("Failed to fetch questionnaires from HQ")
