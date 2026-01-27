@@ -109,11 +109,12 @@ class PulledHistoryGQLType(DjangoObjectType):
 
 
 class PulledQuestionnaireGQLType(graphene.ObjectType):
-    paa_name = graphene.String()
-    number_of_households = graphene.Int()
-    date_pulled = graphene.DateTime()
-    status = graphene.String()  # running, completed, failed, cancelled
-    error_message = graphene.String()  # error details if failed
+    paaName = graphene.String()
+    numberOfHouseholds = graphene.Int()
+    numberOfMembers = graphene.Int()
+    datePulled = graphene.DateTime()
+    status = graphene.String()
+    errorMessage = graphene.String()
 
 
 def resolve_pulled_questionnaires(info, **kwargs):
@@ -124,11 +125,11 @@ def resolve_pulled_questionnaires(info, **kwargs):
     queryset = PulledHistory.get_queryset(None, info.context.user)
 
     # Apply optional filters
-    region_code = kwargs.get("regionCode")
+    region_code = kwargs.get("region_code") or kwargs.get("regionCode")
     if region_code:
         queryset = queryset.filter(region_code=region_code)
 
-    district_code = kwargs.get("districtCode")
+    district_code = kwargs.get("district_code") or kwargs.get("districtCode")
     if district_code:
         queryset = queryset.filter(district_code=district_code)
 
@@ -144,11 +145,13 @@ def resolve_pulled_questionnaires(info, **kwargs):
     for record in queryset:
         results.append(
             PulledQuestionnaireGQLType(
-                paa_name=record.paa_name,
-                number_of_households=record.number_of_households,
-                date_pulled=record.date_pulled,
+                paaName=record.paa_name,
+                numberOfHouseholds=record.number_of_households,
+                numberOfMembers=(record.n_individuals_inserted or 0)
+                + (record.n_individuals_updated or 0),
+                datePulled=record.date_pulled,
                 status=record.status,
-                error_message=record.error_message,
+                errorMessage=record.error_message,
             )
         )
 
@@ -197,16 +200,16 @@ def _get_fallback_pulled_questionnaires(region_code=None, district_code=None):
     for batch_id, data in batch_groups.items():
         results.append(
             PulledQuestionnaireGQLType(
-                paa_name=data["paa_name"],
-                number_of_households=len(data["group_codes"]),
-                date_pulled=data["date_created"],
+                paaName=data["paa_name"],
+                numberOfHouseholds=len(data["group_codes"]),
+                numberOfMembers=0,
+                datePulled=data["date_created"],
                 status="completed",
-                error_message=None,
+                errorMessage=None,
             )
         )
-
     # Sort by date descending
-    results.sort(key=lambda x: x.date_pulled, reverse=True)
+    results.sort(key=lambda x: x.datePulled, reverse=True)
 
     return results
 

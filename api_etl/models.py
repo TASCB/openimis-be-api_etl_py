@@ -182,6 +182,11 @@ class PulledHistory(HistoryModel):
         """Total number of records (individuals) affected in this run."""
         return self.n_individuals_inserted + self.n_individuals_updated
 
+    @property
+    def number_of_members(self) -> int:
+        """Total individuals (members) affected in this run (inserted + updated)."""
+        return self.n_individuals_inserted + self.n_individuals_updated
+
     def update_counts_from_etl_result(self, etl_result: dict, user=None):
         """
         Update counts from ETL result summary.
@@ -193,14 +198,18 @@ class PulledHistory(HistoryModel):
         summary = etl_result.get("summary", {})
         rows = etl_result.get("rows", [])
 
-        # Calculate unique households (groups) affected in this run
-        unique_group_codes = set()
+        # Calculate unique households (prefer interview_key, fallback to group_code)
+        unique_hh_keys = set()
         for row in rows:
-            group_code = row.get("group_code")
-            if group_code:
-                unique_group_codes.add(group_code)
+            ik = row.get("interview_key") or row.get("external_id")
+            if ik:
+                unique_hh_keys.add(str(ik).strip())
+                continue
+            gc = row.get("group_code")
+            if gc:
+                unique_hh_keys.add(str(gc).strip())
 
-        self.number_of_households = len(unique_group_codes)
+        self.number_of_households = len(unique_hh_keys)
 
         # In practice, the sink should provide proper insert/update counts
         total_individuals = summary.get("rows_pushed", 0)
@@ -211,15 +220,19 @@ class PulledHistory(HistoryModel):
         self.n_households_inserted = self.number_of_households
         self.n_households_updated = 0
 
-        # Store run metadata in json_ext following openIMIS patterns
+        # Store run metadata in json_ext
         if not self.json_ext:
             self.json_ext = {}
         self.json_ext.update(
             {
                 "run_metadata": {
-                    "batch_id": summary.get("batch_id"),
-                    "config_ref": summary.get("config_ref"),
+                    "batch_identifier": summary.get("batch_identifier"),
+                    "rows_raw": summary.get("rows_raw"),
+                    "rows_transformed": summary.get("rows_transformed"),
+                    "rows_pushed": summary.get("rows_pushed"),
+                    "per_questionnaire_counts": summary.get("per_questionnaire_counts"),
                     "etl_result_summary": summary,
+                    "note": "counts are simplified: inserted assumed, updated=0",
                 }
             }
         )
