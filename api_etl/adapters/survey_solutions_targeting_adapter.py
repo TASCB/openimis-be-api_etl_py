@@ -163,12 +163,13 @@ class SurveySolutionsTargetingAdapter(DataAdapter):
                 pass
 
         # ------------------- Group Code -------------------
-        tf4_raw = self._get(record, "TF4_NO", "tf4_no")
-        tf4_digits = self._digits(tf4_raw).zfill(4) if tf4_raw else None
+        ik = self._get(record, "interview__key")  # unique per interview
+        ik_digits = self._digits(ik)  # e.g. "00-11-14-46" -> "00111446"
+        last8 = ik_digits[-8:].zfill(8) if ik_digits else None
 
         group_code_val = None
-        if loc_code_str and tf4_digits:
-            group_code_val = f"P3-{loc_code_str}{tf4_digits}"
+        if loc_code_str and last8:
+            group_code_val = f"P3-{loc_code_str}-{last8}"
 
         # ------------------- Role & HHREP -------------------
         rth_val = str(
