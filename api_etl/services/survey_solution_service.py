@@ -275,13 +275,26 @@ def find_matching_questionnaire(
             }
 
         # Sort by score (highest first), then by version (latest first), then by last modified
+        # Sort by score (highest first), then by version (latest first), then by last modified
+        # Sort by score (highest first), then by version (latest first), then by last modified
+        def _safe_last_entry_ts(v: Any) -> int:
+            if not v:
+                return 0
+            if isinstance(v, str):
+                try:
+                    from datetime import datetime
+
+                    vv = v.replace("Z", "+00:00")
+                    return int(datetime.fromisoformat(vv).timestamp())
+                except Exception:
+                    return 0
+            return 0
+
         scored_questionnaires.sort(
             key=lambda x: (
                 -x[0],  # Higher score first
                 -int(x[2].get("Version", 0) or 0),  # Higher version first
-                -(
-                    x[2].get("LastEntryDate") or ""
-                ),  # More recent first (string comparison)
+                -_safe_last_entry_ts(x[2].get("LastEntryDate")),  # More recent first
             )
         )
 
@@ -539,13 +552,13 @@ class SurveySolutionService(_BaseService):
         - Skips metadata files (interview__, export__, assignment__)
         - Selects the richest household row
         - Combines each person row with its matching HH row
+        - Creates household stubs for consent_res=2 (non-consented households)
         """
         bucket: DefaultDict[str, Dict[str, Any]] = defaultdict(
             lambda: {"hh": None, "persons": []}
         )
 
         def richness(d: Dict[str, Any]) -> int:
-            """Count number of non-empty scalar fields."""
             n = 0
             for v in d.values():
                 if isinstance(v, (dict, list)):
@@ -557,8 +570,6 @@ class SurveySolutionService(_BaseService):
             return n
 
         for r in all_rows:
-
-            # 1. SKIP METADATA / NON-DATA TABS
             src_name = r.get("_source", "")
             if isinstance(src_name, str) and (
                 src_name.startswith("interview__")
@@ -567,7 +578,6 @@ class SurveySolutionService(_BaseService):
             ):
                 continue
 
-            # 2. Extract interview key
             ik = self._extract_interview_key(r)
             if not ik:
                 LOG.debug(
@@ -575,23 +585,62 @@ class SurveySolutionService(_BaseService):
                 )
                 continue
 
-            # 3. Person vs Household row classification
             if self._is_person_row(r):
                 bucket[ik]["persons"].append(r)
             else:
                 hh = bucket[ik]["hh"]
-                # Pick the richest HH row
                 if hh is None or richness(r) > richness(hh):
                     bucket[ik]["hh"] = r
-
-        # 4. Combine HH row + each person row
 
         merged: List[Dict[str, Any]] = []
 
         for ik, grp in bucket.items():
             hh = grp.get("hh") or {}
             persons = grp.get("persons") or []
+
             if not persons:
+                consent_res = (
+                    hh.get("consent_res")
+                    or hh.get("Consent_res")
+                    or hh.get("CONSENT_RES")
+                    or hh.get("consent")
+                    or hh.get("Consent")
+                )
+                consent_str = (
+                    str(consent_res).strip() if consent_res is not None else ""
+                )
+
+                head_name = (
+                    hh.get("hhh_name")
+                    or hh.get("hhh_name_cons2")
+                    or hh.get("HHH_NAME")
+                    or hh.get("HHH_NAME_CONS2")
+                    or hh.get("hhh_name_cons1")
+                )
+
+                if consent_str == "2" and head_name:
+                    stub_person = {
+                        "hh_members_name": str(head_name).strip(),
+                        "rel_to_hhh": "1",
+                        "hh_rep": "1",
+                        "record_type": "household_stub",
+                        "consent_res": "2",
+                        "sex": None,
+                        "dob": None,
+                    }
+                    merged.append({**hh, **stub_person})
+                    LOG.debug(
+                        "Created household stub: interview_key=%s head_name=%s",
+                        ik,
+                        head_name,
+                    )
+                else:
+                    LOG.debug(
+                        "Skipped household without roster: interview_key=%s consent_res=%s has_head_name=%s",
+                        ik,
+                        consent_str,
+                        bool(head_name),
+                    )
                 continue
 
             for p in persons:
@@ -602,8 +651,82 @@ class SurveySolutionService(_BaseService):
             len(bucket),
             len(merged),
         )
-
         return merged
+
+    # def _merge_household_roster(
+    #     self, all_rows: List[Dict[str, Any]]
+    # ) -> List[Dict[str, Any]]:
+    #     """
+    #     Merge household header rows with person roster rows using interview key.
+
+    #     - Skips metadata files (interview__, export__, assignment__)
+    #     - Selects the richest household row
+    #     - Combines each person row with its matching HH row
+    #     """
+    #     bucket: DefaultDict[str, Dict[str, Any]] = defaultdict(
+    #         lambda: {"hh": None, "persons": []}
+    #     )
+
+    #     def richness(d: Dict[str, Any]) -> int:
+    #         """Count number of non-empty scalar fields."""
+    #         n = 0
+    #         for v in d.values():
+    #             if isinstance(v, (dict, list)):
+    #                 continue
+    #             if v is None:
+    #                 continue
+    #             if str(v).strip():
+    #                 n += 1
+    #         return n
+
+    #     for r in all_rows:
+
+    #         # 1. SKIP METADATA / NON-DATA TABS
+    #         src_name = r.get("_source", "")
+    #         if isinstance(src_name, str) and (
+    #             src_name.startswith("interview__")
+    #             or src_name.startswith("export__")
+    #             or src_name.startswith("assignment__")
+    #         ):
+    #             continue
+
+    #         # 2. Extract interview key
+    #         ik = self._extract_interview_key(r)
+    #         if not ik:
+    #             LOG.debug(
+    #                 "Row without Interview Key skipped: keys=%s", list(r.keys())[:10]
+    #             )
+    #             continue
+
+    #         # 3. Person vs Household row classification
+    #         if self._is_person_row(r):
+    #             bucket[ik]["persons"].append(r)
+    #         else:
+    #             hh = bucket[ik]["hh"]
+    #             # Pick the richest HH row
+    #             if hh is None or richness(r) > richness(hh):
+    #                 bucket[ik]["hh"] = r
+
+    #     # 4. Combine HH row + each person row
+
+    #     merged: List[Dict[str, Any]] = []
+
+    #     for ik, grp in bucket.items():
+    #         hh = grp.get("hh") or {}
+    #         persons = grp.get("persons") or []
+    #         if not persons:
+    #             continue
+
+    #         for p in persons:
+    #             merged.append({**hh, **p})
+
+    #     LOG.info(
+    #         "Roster merge: %s interviews → %s merged person rows",
+    #         len(bucket),
+    #         len(merged),
+    #     )
+
+    #     return merged
 
     def build_preview_payload(self, records, source_name=None):
         """Return a UI-safe preview (scalars only) to avoid React errors on dict/list values."""

@@ -102,6 +102,7 @@ DEFAULT_CONFIG = {
     # "adapter_gps_alt_field": "gps__alt",
     # "adapter_gps_acc_field": "gps__acc",
     "adapter_consent_field": "consent",
+    "adapter_pssn_wave_field": "pssn_wave",
     "adapter_interview_date_field": "interview_date",
     "adapter_household_size_field": "household_size",
     "adapter_household_photo_url_field": "household_photo_url",

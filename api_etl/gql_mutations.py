@@ -111,11 +111,17 @@ class PAABasedETLMutation(BaseMutation):
             data.pop("client_mutation_id", None)
             data.pop("client_mutation_label", None)
 
-            paa_name = data.get("paa_name")
-            district_code = data.get("district_code")
-            region_code = data.get("region_code")
-            questionnaire_id = data.get("questionnaire_id")
-            dry_run = data.get("dry_run", False)
+            paa_name = data.get("paa_name") or data.get("paaName")
+            district_code = data.get("district_code") or data.get("districtCode")
+            region_code = data.get("region_code") or data.get("regionCode")
+            questionnaire_id = data.get("questionnaire_id") or data.get(
+                "questionnaireId"
+            )
+            dry_run = (
+                data.get("dry_run", False)
+                if data.get("dry_run", None) is not None
+                else data.get("dryRun", False)
+            )
 
             # Generate batch ID for this ETL run
             batch_id = f"ss_batch_{uuid.uuid4().hex[:12]}"
@@ -164,6 +170,7 @@ class PAABasedETLMutation(BaseMutation):
                                 q
                                 for q in questionnaires
                                 if q.get("Identity") == questionnaire_id
+                                or q.get("Id") == questionnaire_id
                             ),
                             None,
                         )
@@ -180,7 +187,7 @@ class PAABasedETLMutation(BaseMutation):
                             prefix = getattr(
                                 ApiEtlConfig,
                                 "questionnaire_title_prefix",
-                                "DODOSO LA KAYA-RM4-",
+                                "DODOSO LA KAYA-RM4_",
                             )
 
                             q_district = _extract_district_from_questionnaire(
@@ -230,6 +237,32 @@ class PAABasedETLMutation(BaseMutation):
                     else:
                         raise Exception("No ETL service available")
 
+                # Fallback: if questionnaire_id not provided, auto-pick best match
+                if not questionnaire_id and paa_name:
+                    try:
+                        from api_etl.gql_queries import resolve_available_questionnaires
+
+                        matches = resolve_available_questionnaires(
+                            info=None,  # not used inside resolve_available_questionnaires
+                            districtName=paa_name,
+                            districtCode=district_code,
+                            regionCode=region_code,
+                            showAll=False,
+                        )
+                        if matches:
+                            questionnaire_id = matches[
+                                0
+                            ].identity  # top scored & sorted already
+                            logger.warning(
+                                "Auto-selected questionnaire_id=%s for paa_name=%s",
+                                questionnaire_id,
+                                paa_name,
+                            )
+                    except Exception as e:
+                        logger.error(
+                            "Auto-selection of questionnaire failed: %s", str(e)
+                        )
+
                 # Configure the service with PAA parameters
                 service_config = {
                     "paa_name": paa_name,
@@ -241,7 +274,54 @@ class PAABasedETLMutation(BaseMutation):
                 }
 
                 etl_service = etl_service_class(user, config=service_config)
-                result = etl_service.execute()
+
+                # If questionnaire_id not provided, auto-detect using the service matcher
+                if not questionnaire_id:
+                    from api_etl.services.survey_solution_service import (
+                        find_matching_questionnaire,
+                    )
+
+                    qid, match_info = find_matching_questionnaire(
+                        district_name=paa_name,
+                        district_code=district_code or "",
+                        region_code=region_code or "",
+                        source=etl_service.source,
+                        config=etl_service.config,
+                        manual_questionnaire_id=None,
+                    )
+                    questionnaire_id = qid
+                    logger.warning(
+                        "Auto-detected questionnaire_id=%s match=%s",
+                        questionnaire_id,
+                        match_info,
+                    )
+
+                    if not questionnaire_id:
+                        history_record.status = "failed"
+                        history_record.error_message = (
+                            match_info.get("error") or "No matching questionnaire found"
+                        )
+                        history_record.save(
+                            username=user.username,
+                            update_fields=["status", "error_message"],
+                        )
+                        return [
+                            {
+                                "message": "api_etl.mutation.failed_to_execute_paa_etl",
+                                "detail": history_record.error_message,
+                            }
+                        ]
+
+                # Run explicitly with questionnaire_id (do not rely on execute())
+                out = etl_service.run(
+                    questionnaire_id=questionnaire_id, dry_run=dry_run
+                )
+
+                result = {
+                    "success": True,
+                    "message": "ok",
+                    "detail": out,
+                }
 
                 # DEBUG: Log result details
                 logger.error(f"=== ETL EXECUTE COMPLETED ===")
