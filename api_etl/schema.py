@@ -1,3 +1,6 @@
+# ================================
+# FILE: api_etl/schema.py
+# ================================
 import graphene
 import graphene_django_optimizer as gql_optimizer
 from django.db.models import Q
@@ -10,18 +13,14 @@ from api_etl.gql_queries import (
     ETLServicesGQLType,
     ETLServicesListGQLType,
     PulledHistoryGQLType,
-    PulledQuestionnaireGQLType,
     QuestionnaireGQLType,
+    PulledQuestionnaireConnection,     # <-- use this
     resolve_pulled_questionnaires,
     resolve_available_questionnaires,
 )
 from api_etl.gql_mutations import ETLServiceMutation, PAABasedETLMutation
 from api_etl.models import PulledHistory
-from api_etl.utils import (
-    get_class_by_name,
-    get_classes_in_module,
-    ETL_CLASS,
-)
+from api_etl.utils import get_class_by_name, get_classes_in_module, ETL_CLASS
 
 
 class Query(graphene.ObjectType):
@@ -36,8 +35,9 @@ class Query(graphene.ObjectType):
         client_mutation_id=graphene.String(),
     )
 
-    pulled_questionnaires = graphene.List(
-        PulledQuestionnaireGQLType,
+    # IMPORTANT: ConnectionField must receive a Connection subclass
+    pulled_questionnaires = graphene.relay.ConnectionField(
+        PulledQuestionnaireConnection,
         region_code=graphene.String(),
         district_code=graphene.String(),
     )
@@ -47,9 +47,7 @@ class Query(graphene.ObjectType):
         district_code=graphene.String(description="Filter by district code"),
         region_code=graphene.String(description="Filter by region code"),
         district_name=graphene.String(description="District name for matching"),
-        show_all=graphene.Boolean(
-            description="Show all questionnaires even with score=0"
-        ),
+        show_all=graphene.Boolean(description="Show all questionnaires even with score=0"),
         description="List questionnaires from HQ, optionally filtered by PAA",
     )
 
@@ -78,9 +76,7 @@ class Query(graphene.ObjectType):
         client_mutation_id = kwargs.get("client_mutation_id")
         if client_mutation_id:
             wait_for_mutation(client_mutation_id)
-            filters.append(
-                Q(mutations__mutation__client_mutation_id=client_mutation_id)
-            )
+            filters.append(Q(mutations__mutation__client_mutation_id=client_mutation_id))
 
         query = PulledHistory.objects.filter(*filters).order_by("-date_pulled")
         return gql_optimizer.query(query, info)
@@ -89,10 +85,10 @@ class Query(graphene.ObjectType):
         if not info.context.user.has_perms(ApiEtlConfig.gql_query_api_etl_rule_perms):
             raise PermissionError("Unauthorized")
 
-        return resolve_pulled_questionnaires(info, **kwargs)
+        # IMPORTANT: resolver signature for ConnectionField is (root, info, **kwargs)
+        return resolve_pulled_questionnaires(self, info, **kwargs)
 
     def resolve_available_questionnaires(self, info, **kwargs):
-        """Fetch questionnaires from HQ, optionally filtered by PAA."""
         if not info.context.user.has_perms(ApiEtlConfig.gql_query_api_etl_rule_perms):
             raise PermissionError("Unauthorized")
         return resolve_available_questionnaires(info, **kwargs)
