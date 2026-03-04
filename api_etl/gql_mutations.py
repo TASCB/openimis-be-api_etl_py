@@ -187,7 +187,7 @@ class PAABasedETLMutation(BaseMutation):
                             prefix = getattr(
                                 ApiEtlConfig,
                                 "questionnaire_title_prefix",
-                                "DODOSO LA KAYA-RM4_",
+                                "DODOSO LA KAYA-RM4-",
                             )
 
                             q_district = _extract_district_from_questionnaire(

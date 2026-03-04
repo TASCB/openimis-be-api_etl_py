@@ -274,9 +274,7 @@ def find_matching_questionnaire(
                 "error": f"No questionnaire found for PAA '{district_name} ({district_code})'",
             }
 
-        # Sort by score (highest first), then by version (latest first), then by last modified
-        # Sort by score (highest first), then by version (latest first), then by last modified
-        # Sort by score (highest first), then by version (latest first), then by last modified
+         # Sort by score (highest first), then by version (latest first), then by last modified
         def _safe_last_entry_ts(v: Any) -> int:
             if not v:
                 return 0

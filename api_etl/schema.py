@@ -1,6 +1,3 @@
-# ================================
-# FILE: api_etl/schema.py
-# ================================
 import graphene
 import graphene_django_optimizer as gql_optimizer
 from django.db.models import Q
@@ -14,7 +11,7 @@ from api_etl.gql_queries import (
     ETLServicesListGQLType,
     PulledHistoryGQLType,
     QuestionnaireGQLType,
-    PulledQuestionnaireConnection,     # <-- use this
+    PulledQuestionnaireConnection,     
     resolve_pulled_questionnaires,
     resolve_available_questionnaires,
 )

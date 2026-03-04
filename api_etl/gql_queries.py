@@ -1,6 +1,3 @@
-# ================================
-# FILE: api_etl/gql_queries.py
-# ================================
 import graphene
 from django.db.models import Q
 from graphene_django import DjangoObjectType
@@ -8,12 +5,16 @@ from individual.models import Individual
 from .models import PulledHistory
 
 
+# -----------------------------------------------------------------------------
+# Helpers: District/PAA parsing + normalization
+# -----------------------------------------------------------------------------
 def _strip_district_suffix(district_name, suffixes=None):
     if not district_name:
         return ""
 
     if suffixes is None:
         from api_etl.apps import ApiEtlConfig
+
         suffixes = getattr(ApiEtlConfig, "district_name_suffixes", ["DC", "TC", "MC"])
 
     district_upper = district_name.upper().strip()
@@ -29,16 +30,24 @@ def _strip_district_suffix(district_name, suffixes=None):
 
 
 def _extract_district_from_questionnaire(questionnaire_title, prefix=None):
+    """
+    Extract the PAA/District token from HQ questionnaire title.
+
+    NOTE: You requested to keep the dash-style prefix throughout.
+    Default prefix is therefore: "DODOSO LA KAYA-RM4-"
+    """
     if not questionnaire_title:
         return ""
 
     if prefix is None:
         from api_etl.apps import ApiEtlConfig
-        prefix = getattr(ApiEtlConfig, "questionnaire_title_prefix", "DODOSO LA KAYA-RM4_")
+
+        prefix = getattr(ApiEtlConfig, "questionnaire_title_prefix", "DODOSO LA KAYA-RM4-")
 
     if prefix and questionnaire_title.startswith(prefix):
-        return questionnaire_title[len(prefix):].strip()
+        return questionnaire_title[len(prefix) :].strip()
 
+    # fallback heuristics
     if "_" in questionnaire_title:
         return questionnaire_title.split("_")[-1].strip()
     if "-" in questionnaire_title:
@@ -47,6 +56,9 @@ def _extract_district_from_questionnaire(questionnaire_title, prefix=None):
     return questionnaire_title.strip()
 
 
+# -----------------------------------------------------------------------------
+# GQL Types
+# -----------------------------------------------------------------------------
 class ETLServicesGQLType(graphene.ObjectType):
     name_of_service = graphene.String()
 
@@ -92,6 +104,9 @@ class PulledQuestionnaireConnection(graphene.relay.Connection):
             return None
 
 
+# -----------------------------------------------------------------------------
+# Pulled questionnaires (history + fallback)
+# -----------------------------------------------------------------------------
 def resolve_pulled_questionnaires(root, info, **kwargs):
     """
     Return an ITERABLE (list). Graphene ConnectionField will paginate it.
@@ -168,10 +183,9 @@ def _get_fallback_pulled_questionnaires(region_code=None, district_code=None):
     return results
 
 
-# ============================================================
+# -----------------------------------------------------------------------------
 # Survey Solutions HQ Questionnaire Listing (PAA-aware)
-# ============================================================
-
+# -----------------------------------------------------------------------------
 class QuestionnaireGQLType(graphene.ObjectType):
     identity = graphene.String()
     id = graphene.String()
@@ -183,7 +197,57 @@ class QuestionnaireGQLType(graphene.ObjectType):
     matching_strategy = graphene.String()
 
 
+def _paa_from_pseudo_district_code(district_code: str):
+    """
+    Pseudo “districts” used only for import UI:
+      9101 = Pemba
+      9102 = Unguja
+    """
+    m = {
+        "9101": "PEMBA",
+        "9102": "UNGUJA",
+    }
+    return m.get(str(district_code))
+
+
+def _filter_questionnaires_by_allowed_paas(questionnaires, allowed_paas):
+    """
+    For Zanzibar region selection (code=91) when user did NOT pick a district/PAA,
+    we want to show only the two PAA questionnaires: UNGUJA & PEMBA.
+    """
+    from api_etl.services.survey_solution_service import _normalize_text
+    from api_etl.apps import ApiEtlConfig as C
+
+    suffixes = getattr(C, "district_name_suffixes", ["DC", "TC", "MC"])
+    prefix = getattr(C, "questionnaire_title_prefix", "DODOSO LA KAYA-RM4-")
+
+    allowed_norm = {_normalize_text(p) for p in (allowed_paas or [])}
+
+    results = []
+    for q in questionnaires or []:
+        title = q.get("Title", "")
+        if not title:
+            continue
+
+        q_district = _extract_district_from_questionnaire(title, prefix)
+        q_district_base = _strip_district_suffix(q_district, suffixes)
+        q_norm = _normalize_text(q_district_base)
+
+        if q_norm in allowed_norm:
+            q2 = dict(q)
+            q2["matching_score"] = 100
+            q2["matching_strategy"] = "paa-allowed"
+            results.append(q2)
+
+    # newest/highest version first
+    results.sort(key=lambda x: (int(x.get("Version", 0) or 0)), reverse=True)
+    return results
+
+
 def _filter_questionnaires_by_paa(questionnaires, district_name=None, district_code=None, region_code=None):
+    """
+    Score questionnaires by how well their (extracted) PAA token matches the requested PAA/district_name.
+    """
     from api_etl.services.survey_solution_service import _normalize_text
     from api_etl.apps import ApiEtlConfig as C
     from datetime import datetime
@@ -192,7 +256,7 @@ def _filter_questionnaires_by_paa(questionnaires, district_name=None, district_c
         return []
 
     suffixes = getattr(C, "district_name_suffixes", ["DC", "TC", "MC"])
-    prefix = getattr(C, "questionnaire_title_prefix", "DODOSO LA KAYA-RM4_")
+    prefix = getattr(C, "questionnaire_title_prefix", "DODOSO LA KAYA-RM4-")
 
     def _safe_ts(v):
         if not v:
@@ -277,15 +341,29 @@ def resolve_available_questionnaires(info, **kwargs):
         if not questionnaires:
             return []
 
-        if district_code or region_code or district_name:
-            questionnaires = _filter_questionnaires_by_paa(
-                questionnaires,
-                district_name=district_name,
-                district_code=district_code,
-                region_code=region_code,
+        # --- Zanzibar UI logic ---
+        # If user selected pseudo PAA district codes (9101/9102), match by PAA name
+        paa_name = _paa_from_pseudo_district_code(district_code) if district_code else None
+        if paa_name:
+            district_name = paa_name  # reuse PAA scoring logic
+
+        # If user selected Zanzibar region (code 91) but no district selected,
+        # only show the two PAA questionnaires (UNGUJA + PEMBA)
+        if str(region_code) == "91" and not district_code and not district_name:
+            questionnaires = _filter_questionnaires_by_allowed_paas(
+                questionnaires, allowed_paas=["UNGUJA", "PEMBA"]
             )
-            if not show_all:
-                questionnaires = [q for q in questionnaires if q.get("matching_score", 0) > 0]
+        else:
+            # normal behaviour
+            if district_code or region_code or district_name:
+                questionnaires = _filter_questionnaires_by_paa(
+                    questionnaires,
+                    district_name=district_name,
+                    district_code=district_code,
+                    region_code=region_code,
+                )
+                if not show_all:
+                    questionnaires = [q for q in questionnaires if q.get("matching_score", 0) > 0]
 
     except Exception as e:
         LOG.exception("Failed to fetch questionnaires from HQ")
