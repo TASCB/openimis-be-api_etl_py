@@ -1,0 +1,283 @@
+from __future__ import annotations
+
+import logging
+import traceback
+from typing import Any, Dict, Optional
+
+from celery import shared_task
+from django.utils import timezone
+
+from api_etl.apps import ApiEtlConfig
+from api_etl.models import PulledHistory
+from api_etl.paa_aliases import are_paa_equivalent, get_paa_scope
+from api_etl.utils import ETL_CLASS, get_class_by_name, get_classes_in_module
+
+logger = logging.getLogger(__name__)
+
+
+def _username(user) -> Optional[str]:
+    return getattr(user, "username", None) or getattr(user, "login_name", None)
+
+
+def _save_history(history: PulledHistory, user=None, update_fields=None):
+    username = _username(user)
+    if username:
+        history.save(username=username, update_fields=update_fields)
+    else:
+        history.save(update_fields=update_fields)
+
+
+def _mark_failed(history: PulledHistory, message: str, user=None):
+    history.status = "failed"
+    history.error_message = message
+    if not history.json_ext:
+        history.json_ext = {}
+    history.json_ext.update(
+        {
+            "task_status": "failed",
+            "failed_at": timezone.now().isoformat(),
+        }
+    )
+    _save_history(history, user=user, update_fields=["status", "error_message", "json_ext"])
+
+
+def _validate_questionnaire_for_paa(
+    *, questionnaire_id: Optional[str], paa_name: Optional[str]
+) -> Optional[str]:
+    if not questionnaire_id or not paa_name:
+        return None
+
+    from api_etl.gql_queries import (
+        _extract_district_from_questionnaire,
+        _strip_district_suffix,
+    )
+    from api_etl.sources.survey_solutions_export_source import (
+        SurveySolutionsExportSource,
+    )
+
+    source = SurveySolutionsExportSource()
+    source.base_url = getattr(ApiEtlConfig, "export_base_url", "")
+    source.workspace = getattr(ApiEtlConfig, "export_workspace", "")
+    source.meta_api_prefix = getattr(ApiEtlConfig, "meta_api_prefix", "/api/v1")
+
+    questionnaires = source.list_questionnaires()
+    selected_q = next(
+        (
+            q
+            for q in questionnaires
+            if q.get("Identity") == questionnaire_id or q.get("Id") == questionnaire_id
+        ),
+        None,
+    )
+    if not selected_q:
+        return None
+
+    q_title = selected_q.get("Title", "")
+    suffixes = getattr(ApiEtlConfig, "district_name_suffixes", ["DC", "TC", "MC"])
+    prefix = getattr(
+        ApiEtlConfig,
+        "questionnaire_title_prefix",
+        "DODOSO LA KAYA-RM4-",
+    )
+
+    q_district = _extract_district_from_questionnaire(q_title, prefix)
+    q_district_base = _strip_district_suffix(q_district, suffixes)
+    paa_base = _strip_district_suffix(paa_name, suffixes)
+
+    if are_paa_equivalent(q_district_base, paa_base, ApiEtlConfig):
+        return None
+
+    return (
+        "Questionnaire validation failed: "
+        f"Selected questionnaire '{q_title}' does not belong to PAA/district '{paa_name}'. "
+        f"Expected PAA/district: '{paa_name}', Found: '{q_district}'"
+    )
+
+
+def execute_paa_etl_history(history_id: str, user_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    from core.models import User
+    from core.utils import clear_current_user, set_current_user
+
+    from api_etl.services.survey_solution_service import find_matching_questionnaire
+
+    user = User.objects.get(id=user_id)
+    history = PulledHistory.objects.get(id=history_id)
+    set_current_user(user)
+
+    paa_name = params.get("paa_name")
+    district_code = params.get("district_code")
+    region_code = params.get("region_code")
+    questionnaire_id = params.get("questionnaire_id")
+    dry_run = bool(params.get("dry_run", False))
+    batch_id = params.get("batch_id")
+    matching_paa_name = (
+        get_paa_scope(name=paa_name, code=district_code, config=ApiEtlConfig)
+        or paa_name
+    )
+
+    try:
+        if not history.json_ext:
+            history.json_ext = {}
+        history.json_ext.update(
+            {
+                "task_status": "started",
+                "started_at": timezone.now().isoformat(),
+            }
+        )
+        _save_history(history, user=user, update_fields=["json_ext"])
+
+        try:
+            mismatch = _validate_questionnaire_for_paa(
+                questionnaire_id=questionnaire_id,
+                paa_name=paa_name,
+            )
+            if mismatch:
+                _mark_failed(history, mismatch, user=user)
+                return {"success": False, "message": mismatch}
+        except Exception as validation_error:
+            logger.error(
+                "Questionnaire validation error (non-blocking): %s",
+                str(validation_error),
+                exc_info=True,
+            )
+
+        etl_service_class = get_class_by_name(ETL_CLASS, "SurveySolutionService")
+        if not etl_service_class:
+            available_services = get_classes_in_module(ETL_CLASS)
+            if available_services:
+                etl_service_class = get_class_by_name(ETL_CLASS, available_services[0])
+            else:
+                raise RuntimeError("No ETL service available")
+
+        service_config = {
+            "paa_name": paa_name,
+            "district_code": district_code,
+            "region_code": region_code,
+            "questionnaire_id": questionnaire_id,
+            "dry_run": dry_run,
+            "batch_id": batch_id,
+        }
+        etl_service = etl_service_class(user, config=service_config)
+
+        match_info = {}
+        if not questionnaire_id and paa_name:
+            try:
+                from api_etl.gql_queries import resolve_available_questionnaires
+
+                matches = resolve_available_questionnaires(
+                    info=None,
+                    districtName=matching_paa_name,
+                    districtCode=district_code,
+                    regionCode=region_code,
+                    showAll=False,
+                )
+                if matches:
+                    questionnaire_id = matches[0].identity
+                    match_info = {
+                        "questionnaire_title": matches[0].title,
+                        "questionnaire_version": matches[0].version,
+                        "matching_strategy": matches[0].matching_strategy,
+                        "candidates_count": len(matches),
+                        "error": None,
+                    }
+            except Exception as exc:
+                logger.error("Auto-selection of questionnaire failed: %s", str(exc), exc_info=True)
+
+        if not questionnaire_id:
+            questionnaire_id, match_info = find_matching_questionnaire(
+                district_name=matching_paa_name,
+                district_code=district_code or "",
+                region_code=region_code or "",
+                source=etl_service.source,
+                config=etl_service.config,
+                manual_questionnaire_id=None,
+            )
+
+        if not questionnaire_id:
+            error_message = (match_info or {}).get("error") or "No matching questionnaire found"
+            _mark_failed(history, error_message, user=user)
+            return {"success": False, "message": error_message}
+
+        history.questionnaire_id = questionnaire_id
+        history.questionnaire_title = (match_info or {}).get("questionnaire_title")
+        history.questionnaire_version = (match_info or {}).get("questionnaire_version")
+        history.matching_strategy = (
+            (match_info or {}).get("matching_strategy")
+            or history.matching_strategy
+            or ("manual-override" if params.get("questionnaire_id") else None)
+        )
+        _save_history(
+            history,
+            user=user,
+            update_fields=[
+                "questionnaire_id",
+                "questionnaire_title",
+                "questionnaire_version",
+                "matching_strategy",
+            ],
+        )
+
+        out = etl_service.run(questionnaire_id=questionnaire_id, dry_run=dry_run)
+
+        history.status = "completed"
+        if not history.json_ext:
+            history.json_ext = {}
+        history.json_ext.update(
+            {
+                "task_status": "completed",
+                "completed_at": timezone.now().isoformat(),
+            }
+        )
+        history.update_counts_from_etl_result(out, user=user)
+
+        history.refresh_from_db()
+        if history.status != "completed":
+            history.status = "completed"
+            if not history.json_ext:
+                history.json_ext = {}
+            history.json_ext.update(
+                {
+                    "task_status": "completed",
+                    "completed_at": timezone.now().isoformat(),
+                }
+            )
+            _save_history(history, user=user, update_fields=["status", "json_ext"])
+
+        logger.info(
+            "PAA ETL completed: history_id=%s district=%s questionnaire=%s households=%s",
+            history_id,
+            district_code,
+            questionnaire_id,
+            history.number_of_households,
+        )
+        return {"success": True, "history_id": str(history.id)}
+
+    except Exception as exc:
+        logger.error("PAA ETL failed: history_id=%s error=%s", history_id, str(exc), exc_info=True)
+        if not history.json_ext:
+            history.json_ext = {}
+        history.json_ext.update(
+            {
+                "task_status": "failed",
+                "failed_at": timezone.now().isoformat(),
+                "traceback": traceback.format_exc(),
+            }
+        )
+        history.status = "failed"
+        history.error_message = str(exc)
+        _save_history(history, user=user, update_fields=["status", "error_message", "json_ext"])
+        return {"success": False, "history_id": str(history.id), "message": str(exc)}
+
+    finally:
+        clear_current_user()
+
+
+@shared_task(bind=True, max_retries=0, name="api_etl.run_paa_etl")
+def run_paa_etl_task(self, history_id: str, user_id: str, params: Dict[str, Any]):
+    logger.info(
+        "Starting async PAA ETL task: task_id=%s history_id=%s district=%s",
+        self.request.id,
+        history_id,
+        params.get("district_code"),
+    )
+    return execute_paa_etl_history(history_id, user_id, params)

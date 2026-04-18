@@ -19,7 +19,12 @@ from workflow.services import WorkflowService
 LOG = logging.getLogger(__name__)
 
 # Hard exclude these keys from CSV headers (never as CSV columns)
-CSV_FIELD_DENYLIST = {"raw", "_source", "phone", "email", "gender", "consent_res", "record_type", "pssn_wave"}
+CSV_FIELD_DENYLIST = {"raw", "_source", "phone", "email", "gender"}
+
+# These are stored inside the adapter json_ext payload, but the individual
+# import workflow also needs them as normal CSV columns so they land flat in
+# Individual.json_ext and can use the existing consent_res index.
+PROMOTED_JSON_EXT_FIELDS = ("consent_res", "record_type", "pssn_wave")
 
 DEFAULT_DOB_SENTINEL = "1900-07-01"
 
@@ -268,6 +273,13 @@ class IndividualImportSink(DataSink):
         if "json_ext" not in fields:
             fields.append("json_ext")
 
+        for field in PROMOTED_JSON_EXT_FIELDS:
+            if field not in fields and any(
+                isinstance(o.get("json_ext"), dict) and o["json_ext"].get(field) not in (None, "")
+                for o in objs
+            ):
+                fields.append(field)
+
         # Keep json_ext at end
         fields = [f for f in fields if f != "json_ext"] + ["json_ext"]
         return fields
@@ -300,6 +312,11 @@ class IndividualImportSink(DataSink):
                 return ""
 
             v = row.get(field)
+            if v in (None, "") and field in PROMOTED_JSON_EXT_FIELDS:
+                jx = row.get("json_ext")
+                if isinstance(jx, dict):
+                    v = jx.get(field)
+
             if v is None:
                 return ""
 
@@ -360,4 +377,3 @@ class IndividualImportSink(DataSink):
             update_wf = self._resolve_workflow(self.update_workflow_cfg)
             method(update_file, update_wf, upd_group_col)
             LOG.info("IndividualImportSink updated %s existing record(s).", len(existing_records))
-

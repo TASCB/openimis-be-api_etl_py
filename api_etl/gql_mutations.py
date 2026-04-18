@@ -1,6 +1,5 @@
 import graphene as graphene
 import uuid
-from datetime import datetime
 import logging
 
 from django.utils.translation import gettext as _
@@ -14,6 +13,7 @@ from api_etl.utils import (
     ETL_CLASS,
 )
 from api_etl.apps import ApiEtlConfig
+from api_etl.paa_aliases import get_paa_scope
 from api_etl.models import PulledHistory
 from core.gql.gql_mutations.base_mutation import BaseMutation
 from core.schema import OpenIMISMutation
@@ -114,6 +114,8 @@ class PAABasedETLMutation(BaseMutation):
             paa_name = data.get("paa_name") or data.get("paaName")
             district_code = data.get("district_code") or data.get("districtCode")
             region_code = data.get("region_code") or data.get("regionCode")
+            paa_scope = get_paa_scope(name=paa_name, code=district_code, config=ApiEtlConfig)
+            matching_paa_name = paa_scope or paa_name
             questionnaire_id = data.get("questionnaire_id") or data.get(
                 "questionnaireId"
             )
@@ -122,6 +124,27 @@ class PAABasedETLMutation(BaseMutation):
                 if data.get("dry_run", None) is not None
                 else data.get("dryRun", False)
             )
+
+            from api_etl.stale_imports import fail_stale_running_imports
+
+            fail_stale_running_imports(district_code=district_code, user=user)
+
+            if (
+                getattr(ApiEtlConfig, "paa_etl_prevent_duplicate_active", True)
+                and district_code
+                and PulledHistory.objects.filter(
+                    district_code=district_code,
+                    status="running",
+                ).exists()
+            ):
+                return [
+                    {
+                        "message": "api_etl.mutation.paa_etl_already_running",
+                        "detail": _(
+                            "An import is already running for this district. Please wait for it to complete or choose another district."
+                        ),
+                    }
+                ]
 
             # Generate batch ID for this ETL run
             batch_id = f"ss_batch_{uuid.uuid4().hex[:12]}"
@@ -141,278 +164,88 @@ class PAABasedETLMutation(BaseMutation):
                 },
                 user=user,
                 status="running",
+                json_ext={
+                    "execution_mode": (
+                        "async"
+                        if getattr(ApiEtlConfig, "paa_etl_async_enabled", True)
+                        else "sync"
+                    ),
+                    "task_status": "queued",
+                    "batch_id": batch_id,
+                },
             )
 
-            try:
-                # VALIDATION: Ensure questionnaire matches selected PAA/district
-                if questionnaire_id and paa_name:
-                    from api_etl.gql_queries import (
-                        _strip_district_suffix,
-                        _extract_district_from_questionnaire,
-                    )
-                    from api_etl.apps import ApiEtlConfig
-                    from api_etl.sources.survey_solutions_export_source import (
-                        SurveySolutionsExportSource,
-                    )
+            params = {
+                "paa_name": paa_name,
+                "district_code": district_code,
+                "region_code": region_code,
+                "matching_paa_name": matching_paa_name,
+                "questionnaire_id": questionnaire_id,
+                "dry_run": dry_run,
+                "batch_id": batch_id,
+            }
 
-                    # Get questionnaire title from HQ to validate
-                    try:
-                        source = SurveySolutionsExportSource()
-                        source.base_url = getattr(ApiEtlConfig, "export_base_url", "")
-                        source.workspace = getattr(ApiEtlConfig, "export_workspace", "")
-                        source.meta_api_prefix = getattr(
-                            ApiEtlConfig, "meta_api_prefix", "/api/v1"
-                        )
+            from api_etl.tasks import execute_paa_etl_history, run_paa_etl_task
 
-                        questionnaires = source.list_questionnaires()
-                        selected_q = next(
-                            (
-                                q
-                                for q in questionnaires
-                                if q.get("Identity") == questionnaire_id
-                                or q.get("Id") == questionnaire_id
-                            ),
-                            None,
-                        )
-
-                        if selected_q:
-                            q_title = selected_q.get("Title", "")
-
-                            # Extract district from questionnaire title
-                            suffixes = getattr(
-                                ApiEtlConfig,
-                                "district_name_suffixes",
-                                ["DC", "TC", "MC"],
-                            )
-                            prefix = getattr(
-                                ApiEtlConfig,
-                                "questionnaire_title_prefix",
-                                "DODOSO LA KAYA-RM4-",
-                            )
-
-                            q_district = _extract_district_from_questionnaire(
-                                q_title, prefix
-                            )
-                            q_district_base = _strip_district_suffix(
-                                q_district, suffixes
-                            )
-                            paa_base = _strip_district_suffix(paa_name, suffixes)
-
-                            # Compare base names (case-insensitive)
-                            if q_district_base.upper() != paa_base.upper():
-                                history_record.status = "failed"
-                                history_record.error_message = (
-                                    f"Questionnaire validation failed: "
-                                    f"Selected questionnaire '{q_title}' does not belong to district '{paa_name}'. "
-                                    f"Expected district: '{paa_name}', Found: '{q_district}'"
-                                )
-                                history_record.save(
-                                    username=user.username,
-                                    update_fields=["status", "error_message"],
-                                )
-                                return [
-                                    {
-                                        "message": "api_etl.mutation.questionnaire_mismatch",
-                                        "detail": history_record.error_message,
-                                    }
-                                ]
-                    except Exception as validation_error:
-                        # Log but don't block import if validation fails
-                        logger.error(
-                            f"Questionnaire validation error (non-blocking): {str(validation_error)}"
-                        )
-
-                # Find and execute the Survey Solutions ETL service
-                etl_service_class = get_class_by_name(
-                    ETL_CLASS, "SurveySolutionService"
-                )
-                if not etl_service_class:
-                    from api_etl.utils import get_classes_in_module
-
-                    available_services = get_classes_in_module(ETL_CLASS)
-                    if available_services:
-                        etl_service_class = get_class_by_name(
-                            ETL_CLASS, available_services[0]
+            if getattr(ApiEtlConfig, "paa_etl_async_enabled", True):
+                try:
+                    queue_name = getattr(ApiEtlConfig, "paa_etl_task_queue", "") or None
+                    if queue_name:
+                        async_result = run_paa_etl_task.apply_async(
+                            args=[str(history_record.id), str(user.id), params],
+                            queue=queue_name,
                         )
                     else:
-                        raise Exception("No ETL service available")
-
-                # Fallback: if questionnaire_id not provided, auto-pick best match
-                if not questionnaire_id and paa_name:
-                    try:
-                        from api_etl.gql_queries import resolve_available_questionnaires
-
-                        matches = resolve_available_questionnaires(
-                            info=None,  # not used inside resolve_available_questionnaires
-                            districtName=paa_name,
-                            districtCode=district_code,
-                            regionCode=region_code,
-                            showAll=False,
-                        )
-                        if matches:
-                            questionnaire_id = matches[
-                                0
-                            ].identity  # top scored & sorted already
-                            logger.warning(
-                                "Auto-selected questionnaire_id=%s for paa_name=%s",
-                                questionnaire_id,
-                                paa_name,
-                            )
-                    except Exception as e:
-                        logger.error(
-                            "Auto-selection of questionnaire failed: %s", str(e)
+                        async_result = run_paa_etl_task.delay(
+                            str(history_record.id),
+                            str(user.id),
+                            params,
                         )
 
-                # Configure the service with PAA parameters
-                service_config = {
-                    "paa_name": paa_name,
-                    "district_code": district_code,
-                    "region_code": region_code,
-                    "questionnaire_id": questionnaire_id,
-                    "dry_run": dry_run,
-                    "batch_id": batch_id,
-                }
-
-                etl_service = etl_service_class(user, config=service_config)
-
-                # If questionnaire_id not provided, auto-detect using the service matcher
-                if not questionnaire_id:
-                    from api_etl.services.survey_solution_service import (
-                        find_matching_questionnaire,
+                    history_record.json_ext = history_record.json_ext or {}
+                    history_record.json_ext.update(
+                        {
+                            "task_id": async_result.id,
+                            "task_status": "queued",
+                        }
                     )
-
-                    qid, match_info = find_matching_questionnaire(
-                        district_name=paa_name,
-                        district_code=district_code or "",
-                        region_code=region_code or "",
-                        source=etl_service.source,
-                        config=etl_service.config,
-                        manual_questionnaire_id=None,
+                    history_record.save(username=user.username, update_fields=["json_ext"])
+                    logger.info(
+                        "Queued async PAA ETL: history_id=%s task_id=%s district=%s",
+                        history_record.id,
+                        async_result.id,
+                        district_code,
                     )
-                    questionnaire_id = qid
-                    logger.warning(
-                        "Auto-detected questionnaire_id=%s match=%s",
-                        questionnaire_id,
-                        match_info,
-                    )
-
-                    if not questionnaire_id:
+                    return None
+                except Exception as exc:
+                    logger.exception("Failed to queue async PAA ETL")
+                    if not getattr(
+                        ApiEtlConfig,
+                        "paa_etl_fallback_to_sync_on_queue_error",
+                        True,
+                    ):
                         history_record.status = "failed"
-                        history_record.error_message = (
-                            match_info.get("error") or "No matching questionnaire found"
-                        )
+                        history_record.error_message = str(exc)
+                        history_record.json_ext = history_record.json_ext or {}
+                        history_record.json_ext.update({"task_status": "queue_failed"})
                         history_record.save(
                             username=user.username,
-                            update_fields=["status", "error_message"],
+                            update_fields=["status", "error_message", "json_ext"],
                         )
                         return [
                             {
-                                "message": "api_etl.mutation.failed_to_execute_paa_etl",
-                                "detail": history_record.error_message,
+                                "message": "api_etl.mutation.failed_to_queue_paa_etl",
+                                "detail": str(exc),
                             }
                         ]
 
-                # Run explicitly with questionnaire_id (do not rely on execute())
-                out = etl_service.run(
-                    questionnaire_id=questionnaire_id, dry_run=dry_run
-                )
-
-                result = {
-                    "success": True,
-                    "message": "ok",
-                    "detail": out,
-                }
-
-                # DEBUG: Log result details
-                logger.error(f"=== ETL EXECUTE COMPLETED ===")
-                logger.error(f"Result type: {type(result)}")
-                logger.error(
-                    f"Result keys: {result.keys() if isinstance(result, dict) else 'NOT A DICT'}"
-                )
-                logger.error(
-                    f"Result success: {result.get('success') if isinstance(result, dict) else 'N/A'}"
-                )
-                logger.error(
-                    f"Result detail type: {type(result.get('detail')) if isinstance(result, dict) else 'N/A'}"
-                )
-
-                if result.get("success"):
-                    # Update history record with results
-                    logger.error(f"=== STATUS UPDATE STARTING ===")
-                    logger.error(f"History record uuid: {history_record.uuid}")
-
-                    history_record.status = "completed"
-                    logger.error(f"Status set to: {history_record.status}")
-                    logger.error(f"About to call update_counts_from_etl_result")
-
-                    history_record.update_counts_from_etl_result(
-                        result.get("detail", {}),
-                        user=user,  # Pass user for audit logging
-                    )
-                    logger.error(f"update_counts_from_etl_result completed")
-
-                    history_record.refresh_from_db()
-                    logger.error(
-                        f"After refresh_from_db, status={history_record.status}"
+                    logger.warning(
+                        "Falling back to synchronous PAA ETL execution for history_id=%s",
+                        history_record.id,
                     )
 
-                    if history_record.status != "completed":
-                        history_record.status = "completed"
-                        history_record.save(
-                            username=user.username, update_fields=["status"]
-                        )
-                        logger.error(f"Did defensive save with update_fields")
-
-                    logger.error(f"=== STATUS UPDATE COMPLETED ===")
-                    logger.error(f"Final status: {history_record.status}")
-                    logger.error(
-                        f"Final household count: {history_record.number_of_households}"
-                    )
-                    return None
-                else:
-                    logger.error(f"=== ETL FAILED ===")
-                    logger.error(f"Result was NOT successful")
-                    logger.error(f"Result detail: {result.get('detail', 'NO DETAIL')}")
-
-                    history_record.status = "failed"
-                    history_record.error_message = result.get(
-                        "detail", "ETL execution failed"
-                    )
-                    history_record.save(
-                        username=user.username,
-                        update_fields=["status", "error_message"],
-                    )
-
-                    return [
-                        {
-                            "message": result.get(
-                                "message", "api_etl.mutation.failed_to_execute_paa_etl"
-                            ),
-                            "detail": result.get("detail", ""),
-                        }
-                    ]
-
-            except Exception as exc:
-                # Update history record with error
-                logger.error(f"=== EXCEPTION IN ETL EXECUTION ===")
-                logger.error(f"Exception type: {type(exc)}")
-                logger.error(f"Exception message: {str(exc)}")
-                import traceback
-
-                logger.error(f"Traceback: {traceback.format_exc()}")
-
-                history_record.status = "failed"
-                history_record.error_message = str(exc)
-                history_record.save(
-                    username=user.username, update_fields=["status", "error_message"]
-                )
-                # Don't re-raise to avoid transaction rollback
-                return [
-                    {
-                        "message": "api_etl.mutation.failed_to_execute_paa_etl",
-                        "detail": str(exc),
-                    }
-                ]
+            execute_paa_etl_history(str(history_record.id), str(user.id), params)
+            return None
 
         except Exception as exc:
             return [

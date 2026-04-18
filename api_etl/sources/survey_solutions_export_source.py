@@ -5,6 +5,9 @@ import re
 import time
 import logging
 import zipfile
+import copy
+import hashlib
+import json
 from typing import Dict, Iterable, Iterator, List, Optional, Union
 
 import requests
@@ -132,6 +135,26 @@ class SurveySolutionsExportSource(DataSource):
     workspace: str = ""
     api_prefix: str = "/api/v2"
     meta_api_prefix: str = "/api/v1"
+    _questionnaire_list_cache: Dict[str, Dict] = {}
+
+    @classmethod
+    def clear_questionnaire_list_cache(cls):
+        cls._questionnaire_list_cache.clear()
+
+    @staticmethod
+    def _cache_key(*, endpoint_base: str, auth_type: Optional[str], username: Optional[str], bearer: Optional[str]) -> str:
+        raw = json.dumps(
+            {
+                "endpoint_base": endpoint_base,
+                "auth_type": auth_type or getattr(C, "auth_type", "basic"),
+                "username": username if username is not None else getattr(C, "auth_basic_username", ""),
+                "bearer_hash": hashlib.sha256(
+                    str(bearer if bearer is not None else getattr(C, "auth_bearer_token", "")).encode("utf-8")
+                ).hexdigest(),
+            },
+            sort_keys=True,
+        )
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     # ------------------- list available questionnaires -------------------
     def list_questionnaires(
@@ -184,23 +207,39 @@ class SurveySolutionsExportSource(DataSource):
         if "headers" in rkwargs:
             headers.update(rkwargs["headers"])
 
-        # ---- FIX: paginate the questionnaires list ----
-        limit = int(getattr(C, "questionnaires_page_size", 200) or 200)
-        offset = 0
+        cache_seconds = int(getattr(C, "questionnaire_list_cache_seconds", 300) or 0)
+        cache_key = self._cache_key(
+            endpoint_base=endpoint_base,
+            auth_type=auth_type,
+            username=username,
+            bearer=bearer,
+        )
+        if cache_seconds > 0:
+            cached = self._questionnaire_list_cache.get(cache_key)
+            if cached and cached.get("expires_at", 0) > time.time():
+                LOG.info(
+                    "Using cached Survey Solutions questionnaire list (%d item(s), ttl=%ss)",
+                    len(cached.get("data", [])),
+                    int(cached.get("expires_at", 0) - time.time()),
+                )
+                return copy.deepcopy(cached.get("data", []))
+
+        # Survey Solutions pagination:
+        # - 'offset' is a 1-indexed PAGE NUMBER (not an item offset)
+        # - 'limit' is items per page (server caps at 40 regardless of requested value)
+        # - TotalCount = total questionnaire count across all pages
+        # Correct pattern: offset=1 → page 1 (items 1-40), offset=2 → page 2 (items 41-80), etc.
+        page_size = 40
+        page = 1  # 1-indexed page number
         all_rows: List[Dict] = []
         total_count = None
 
-        LOG.info(
-            "Fetching questionnaires list from %s (limit=%s, offset=%s)",
-            url,
-            limit,
-            offset,
-        )
+        LOG.info("Fetching questionnaires list from %s", url)
 
         while True:
             r = requests.get(
                 url,
-                params={"limit": limit, "offset": offset},
+                params={"limit": page_size, "offset": page},
                 headers=headers,
                 timeout=30,
                 **{k: v for k, v in rkwargs.items() if k != "headers"},
@@ -241,13 +280,19 @@ class SurveySolutionsExportSource(DataSource):
 
             all_rows.extend([x for x in page_items if isinstance(x, dict)])
 
-            # Stop conditions
+            LOG.info(
+                "Fetched page %d: %d items (total so far: %d / %s)",
+                page, len(page_items), len(all_rows), total_count,
+            )
+
+            # Stop when we have everything
             if total_count is not None and len(all_rows) >= int(total_count):
                 break
-            if len(page_items) < limit:
+            # Partial page means last page
+            if len(page_items) < page_size:
                 break
 
-            offset += limit
+            page += 1
 
         data = all_rows
         LOG.info(
@@ -334,6 +379,13 @@ class SurveySolutionsExportSource(DataSource):
                         break
 
         LOG.info("Fetched total of %d questionnaire versions", len(all_questionnaires))
+        unique_titles = sorted({q.get("Title", "") for q in all_questionnaires if q.get("Title")})
+        LOG.info("Unique questionnaire titles returned (%d): %s", len(unique_titles), unique_titles)
+        if cache_seconds > 0:
+            self._questionnaire_list_cache[cache_key] = {
+                "expires_at": time.time() + cache_seconds,
+                "data": copy.deepcopy(all_questionnaires),
+            }
         return all_questionnaires
 
     # ------------------- low-level Export API calls -------------------

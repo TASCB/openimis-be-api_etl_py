@@ -11,6 +11,7 @@ from api_etl.workflows.pmt import enrich_rows_with_pmt
 
 from api_etl.services.base import ETLService as _BaseService
 from api_etl.apps import ApiEtlConfig as C
+from api_etl.paa_aliases import get_paa_alias_candidates, get_paa_scope
 
 # Source / Adapter
 from api_etl.sources.survey_solutions_export_source import (
@@ -124,6 +125,7 @@ def _score_questionnaire_match(
     # Normalize inputs
     normalized_title = _normalize_text(title)
     normalized_district = _normalize_text(district_name)
+    district_alias_candidates = get_paa_alias_candidates(district_name, district_code, config)
 
     # Remove stop words if configured
     if stop_words:
@@ -156,11 +158,18 @@ def _score_questionnaire_match(
 
     # Check for SUFFIX match (district name at END of title after last dash)
     has_suffix_match = False
+    has_alias_match = False
     if normalized_district:
         # Extract the suffix (text after last dash or just the whole title)
         if "-" in title:
             suffix = title.split("-")[-1].strip()
             suffix_normalized = _normalize_text(suffix)
+            title_alias_candidates = get_paa_alias_candidates(suffix, config=config)
+            has_alias_match = bool(
+                district_alias_candidates
+                and title_alias_candidates
+                and district_alias_candidates.intersection(title_alias_candidates)
+            )
             # Remove stop words from suffix too
             if stop_words:
                 stop_words_normalized = [_normalize_text(word) for word in stop_words]
@@ -198,6 +207,8 @@ def _score_questionnaire_match(
             )
 
     # Determine score and strategy (HIGHER scores are better!)
+    if has_alias_match:
+        return 6, "paa-alias"
     if has_suffix_match and (has_district_code or has_region_code):
         return 5, "suffix+code"  # Best match: district at end + code
     elif has_suffix_match:
@@ -256,11 +267,17 @@ def find_matching_questionnaire(
                 "error": "No questionnaires found in HQ",
             }
 
+        matching_district_name = get_paa_scope(
+            name=district_name,
+            code=district_code,
+            config=config,
+        ) or district_name
+
         # Score all questionnaires
         scored_questionnaires = []
         for q in questionnaires:
             score, strategy = _score_questionnaire_match(
-                q, district_name, district_code, region_code, config
+                q, matching_district_name, district_code, region_code, config
             )
             if score > 0:  # Only keep matches
                 scored_questionnaires.append((score, strategy, q))
@@ -371,8 +388,12 @@ class SurveySolutionService(_BaseService):
         # prefer explicit user kwarg
         user = user if user is not None else self_user
 
-        # Config + wiring
-        self.config: Dict[str, Any] = config or C.__dict__
+        # Config + wiring. Runtime callers pass small overlays such as
+        # {"questionnaire_id": "..."}; keep the module config as defaults.
+        base_config = {
+            k: v for k, v in C.__dict__.items() if not str(k).startswith("_")
+        }
+        self.config: Dict[str, Any] = {**base_config, **(config or {})}
         self.source = source or Source()
         self.adapter = adapter or Adapter(config=self.config)
         self.batch_size = max(1, int(batch_size))

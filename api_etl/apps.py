@@ -20,16 +20,45 @@ DEFAULT_CONFIG = {
     "export_poll_interval_seconds": 3,
     "export_timeout_seconds": 900,
     "export_keep_zip": False,
+    # --- PAA ETL execution ---
+    # When enabled, GraphQL returns immediately and Celery/RabbitMQ runs the import.
+    "paa_etl_async_enabled": True,
+    # Keep local/dev usable if the broker is unavailable.
+    "paa_etl_fallback_to_sync_on_queue_error": True,
+    # Prevent duplicate imports for the same district while a previous one is running.
+    "paa_etl_prevent_duplicate_active": True,
+    # Optional Celery queue name. Empty string uses the worker default queue.
+    "paa_etl_task_queue": "",
+    # Mark imports still running after this many hours as failed when history is read
+    # or before duplicate-running checks are applied. Counts already saved remain visible.
+    "paa_etl_running_timeout_hours": 3,
     # --- Questionnaire default(s) ---
     "questionnaire_id": "",  # single
     "export_questionnaire_ids": [],  # or multiple
     # --- Questionnaire matching configuration ---
-    "questionnaire_title_prefix": "DODOSO LA KAYA-RM4-",  # Expected prefix in questionnaire titles
-    "district_name_suffixes": [
-        "DC",
-        "TC",
-        "MC",
-    ],  # Valid district suffixes to strip for matching
+    "questionnaire_title_prefix": "DODOSO LA KAYA - RM4-",
+    "questionnaire_title_prefixes": [
+        "DODOSO LA KAYA - RM4-",
+        "DODOSO LA KAYA-RM4-",
+        "DODOSO LA KAYA - RM4-",
+        "DODOSO LA KAYA -RM4-",
+    ],
+    "questionnaire_list_cache_seconds": 300,
+    "district_name_suffixes": ["DC", "TC", "MC"],
+    "questionnaire_district_aliases": {
+        "PEMBA": ["PEMBA", "KASKAZINI PEMBA", "KUSINI PEMBA"],
+        "UNGUJA": ["UNGUJA", "KASKAZINI UNGUJA", "KUSINI UNGUJA", "MJINI MAGHARIBI"],
+    },
+    "paa_aliases": {
+        "PEMBA": {
+            "codes": ["54", "55"],
+            "names": ["PEMBA", "KASKAZINI PEMBA", "KUSINI PEMBA"],
+        },
+        "UNGUJA": {
+            "codes": ["51", "52", "53"],
+            "names": ["UNGUJA", "KASKAZINI UNGUJA", "KUSINI UNGUJA", "MJINI MAGHARIBI"],
+        },
+    },
     # --- Adapter field mapping (core) ---
     "adapter_first_name_field": "firstname",
     "adapter_last_name_field": "lastname",

@@ -1,7 +1,17 @@
+import re
+from datetime import datetime
+
 import graphene
 from django.db.models import Q
 from graphene_django import DjangoObjectType
 from individual.models import Individual
+
+from api_etl.paa_aliases import (
+    get_paa_alias_candidates,
+    get_paa_aliases,
+    get_paa_scope,
+    scopes_for_codes,
+)
 from .models import PulledHistory
 
 
@@ -31,29 +41,124 @@ def _strip_district_suffix(district_name, suffixes=None):
 
 def _extract_district_from_questionnaire(questionnaire_title, prefix=None):
     """
-    Extract the PAA/District token from HQ questionnaire title.
+    Extract district/PAA token from questionnaire title.
 
-    NOTE: You requested to keep the dash-style prefix throughout.
-    Default prefix is therefore: "DODOSO LA KAYA-RM4-"
+    Handles:
+    - DODOSO LA KAYA-RM4-MONDULIDC
+    - DODOSO LA KAYA - RM4-KISARAWEDC
+    - DODOSO LA KAYA -RM4-KISARAWEDC
+    - DODOSO LA KAYA - RM4 - KISARAWEDC
+    - titles with unicode dashes
     """
     if not questionnaire_title:
         return ""
 
-    if prefix is None:
-        from api_etl.apps import ApiEtlConfig
+    title = str(questionnaire_title).strip()
 
-        prefix = getattr(ApiEtlConfig, "questionnaire_title_prefix", "DODOSO LA KAYA-RM4-")
+    # Normalize different dash characters to normal hyphen
+    title = (
+        title.replace("–", "-")
+        .replace("—", "-")
+        .replace("−", "-")
+        .replace("-", "-")
+    )
 
-    if prefix and questionnaire_title.startswith(prefix):
-        return questionnaire_title[len(prefix) :].strip()
+    # Normalize repeated whitespace
+    title = re.sub(r"\s+", " ", title).strip()
+
+    # Robust pattern for all expected title variants
+    match = re.match(
+        r"^\s*DODOSO\s+LA\s+KAYA\s*-\s*RM4\s*-\s*(.+?)\s*$",
+        title,
+        flags=re.IGNORECASE,
+    )
+    if match:
+        return match.group(1).strip()
+
+    # fallback to configured prefix after normalization
+    if prefix:
+        normalized_prefix = str(prefix).strip()
+        normalized_prefix = (
+            normalized_prefix.replace("–", "-")
+            .replace("—", "-")
+            .replace("−", "-")
+            .replace("-", "-")
+        )
+        normalized_prefix = re.sub(r"\s+", " ", normalized_prefix).strip()
+
+        if title.startswith(normalized_prefix):
+            return title[len(normalized_prefix):].strip()
 
     # fallback heuristics
-    if "_" in questionnaire_title:
-        return questionnaire_title.split("_")[-1].strip()
-    if "-" in questionnaire_title:
-        return questionnaire_title.split("-")[-1].strip()
+    if "_" in title:
+        return title.split("_")[-1].strip()
+    if "-" in title:
+        return title.split("-")[-1].strip()
 
-    return questionnaire_title.strip()
+    return title.strip()
+
+
+def _safe_ts(value):
+    if not value:
+        return 0
+    if isinstance(value, datetime):
+        return int(value.timestamp())
+    if isinstance(value, str):
+        try:
+            vv = value.replace("Z", "+00:00")
+            return int(datetime.fromisoformat(vv).timestamp())
+        except Exception:
+            return 0
+    return 0
+
+
+def _get_questionnaire_aliases_map():
+    return {scope: data.get("names", []) for scope, data in get_paa_aliases().items()}
+
+
+def _get_candidate_district_names(district_name=None, district_code=None):
+    from api_etl.services.survey_solution_service import _normalize_text
+    from api_etl.apps import ApiEtlConfig as C
+
+    if not district_name and not district_code:
+        return set()
+
+    suffixes = getattr(C, "district_name_suffixes", ["DC", "TC", "MC"])
+    aliases_cfg = _get_questionnaire_aliases_map()
+
+    raw = (district_name or "").strip()
+    base = _strip_district_suffix(raw, suffixes)
+
+    candidates = {
+        _normalize_text(raw),
+        _normalize_text(base),
+    }
+    candidates.update(get_paa_alias_candidates(raw, district_code, C))
+
+    raw_upper = raw.upper().strip()
+    base_upper = base.upper().strip()
+
+    alias_values = []
+    alias_values.extend(aliases_cfg.get(raw_upper, []))
+    alias_values.extend(aliases_cfg.get(base_upper, []))
+
+    # Reverse lookup:
+    # if selected district is already one of alias values, include the alias key
+    # and all sibling alias values as candidates too.
+    raw_norm = _normalize_text(raw)
+    base_norm = _normalize_text(base)
+
+    for alias_key, alias_list in aliases_cfg.items():
+        alias_norms = {_normalize_text(a) for a in alias_list}
+        if raw_norm in alias_norms or base_norm in alias_norms:
+            alias_values.append(alias_key)
+            alias_values.extend(alias_list)
+
+    for alias in alias_values:
+        candidates.add(_normalize_text(alias))
+        candidates.add(_normalize_text(_strip_district_suffix(alias, suffixes)))
+
+    return {c for c in candidates if c}
 
 
 # -----------------------------------------------------------------------------
@@ -89,7 +194,6 @@ class PulledQuestionnaireGQLType(graphene.ObjectType):
     errorMessage = graphene.String()
 
 
-# IMPORTANT: this is the Connection subclass that schema.py must use
 class PulledQuestionnaireConnection(graphene.relay.Connection):
     class Meta:
         node = PulledQuestionnaireGQLType
@@ -97,7 +201,6 @@ class PulledQuestionnaireConnection(graphene.relay.Connection):
     totalCount = graphene.Int()
 
     def resolve_totalCount(root, info, **kwargs):
-        # root.iterable is the full iterable given to ConnectionField resolver
         try:
             return len(root.iterable)
         except Exception:
@@ -108,9 +211,8 @@ class PulledQuestionnaireConnection(graphene.relay.Connection):
 # Pulled questionnaires (history + fallback)
 # -----------------------------------------------------------------------------
 def resolve_pulled_questionnaires(root, info, **kwargs):
-    """
-    Return an ITERABLE (list). Graphene ConnectionField will paginate it.
-    """
+    from api_etl.stale_imports import fail_stale_running_imports
+
     queryset = PulledHistory.get_queryset(None, info.context.user)
 
     region_code = kwargs.get("region_code") or kwargs.get("regionCode")
@@ -120,6 +222,8 @@ def resolve_pulled_questionnaires(root, info, **kwargs):
     district_code = kwargs.get("district_code") or kwargs.get("districtCode")
     if district_code:
         queryset = queryset.filter(district_code=district_code)
+
+    fail_stale_running_imports(district_code=district_code, user=info.context.user)
 
     queryset = queryset.order_by("-date_pulled", "-id")
 
@@ -199,27 +303,33 @@ class QuestionnaireGQLType(graphene.ObjectType):
 
 def _paa_from_pseudo_district_code(district_code: str):
     """
-    Pseudo “districts” used only for import UI:
+    Pseudo "districts" used only for legacy import UI:
       9101 = Pemba
       9102 = Unguja
+
+    Real Zanzibar location codes are resolved through api_etl.paa_aliases.
     """
-    m = {
+    scope = get_paa_scope(code=district_code)
+    if scope:
+        return scope
+
+    mapping = {
         "9101": "PEMBA",
         "9102": "UNGUJA",
     }
-    return m.get(str(district_code))
+    return mapping.get(str(district_code))
 
 
 def _filter_questionnaires_by_allowed_paas(questionnaires, allowed_paas):
     """
     For Zanzibar region selection (code=91) when user did NOT pick a district/PAA,
-    we want to show only the two PAA questionnaires: UNGUJA & PEMBA.
+    show only the two PAA questionnaires: UNGUJA & PEMBA.
     """
     from api_etl.services.survey_solution_service import _normalize_text
     from api_etl.apps import ApiEtlConfig as C
 
     suffixes = getattr(C, "district_name_suffixes", ["DC", "TC", "MC"])
-    prefix = getattr(C, "questionnaire_title_prefix", "DODOSO LA KAYA-RM4-")
+    prefix = getattr(C, "questionnaire_title_prefix", "DODOSO LA KAYA - RM4-")
 
     allowed_norm = {_normalize_text(p) for p in (allowed_paas or [])}
 
@@ -239,41 +349,37 @@ def _filter_questionnaires_by_allowed_paas(questionnaires, allowed_paas):
             q2["matching_strategy"] = "paa-allowed"
             results.append(q2)
 
-    # newest/highest version first
-    results.sort(key=lambda x: (int(x.get("Version", 0) or 0)), reverse=True)
+    results.sort(
+        key=lambda x: (
+            int(x.get("Version", 0) or 0),
+            _safe_ts(x.get("LastEntryDate")),
+        ),
+        reverse=True,
+    )
     return results
 
 
 def _filter_questionnaires_by_paa(questionnaires, district_name=None, district_code=None, region_code=None):
     """
-    Score questionnaires by how well their (extracted) PAA token matches the requested PAA/district_name.
+    Score questionnaires by how well their extracted district/PAA token matches
+    the requested district name.
+
+    This improves matching for:
+    - KISARAWE -> KISARAWEDC / KISARAWE DC / KISARAWE
+    - KAKONKO -> KAKONKODC / KAKONKO DC / KAKONKOTC / KAKONKO TC
+    - KARATU -> KARATU
+    - Zanzibar PAA aliases such as PEMBA / UNGUJA
     """
     from api_etl.services.survey_solution_service import _normalize_text
     from api_etl.apps import ApiEtlConfig as C
-    from datetime import datetime
 
     if not questionnaires:
         return []
 
     suffixes = getattr(C, "district_name_suffixes", ["DC", "TC", "MC"])
-    prefix = getattr(C, "questionnaire_title_prefix", "DODOSO LA KAYA-RM4-")
+    prefix = getattr(C, "questionnaire_title_prefix", "DODOSO LA KAYA - RM4-")
 
-    def _safe_ts(v):
-        if not v:
-            return 0
-        if isinstance(v, datetime):
-            return int(v.timestamp())
-        if isinstance(v, str):
-            try:
-                vv = v.replace("Z", "+00:00")
-                return int(datetime.fromisoformat(vv).timestamp())
-            except Exception:
-                return 0
-        return 0
-
-    district_base = _strip_district_suffix(district_name, suffixes) if district_name else ""
-    district_normalized = _normalize_text(district_name) if district_name else ""
-    district_base_normalized = _normalize_text(district_base) if district_base else ""
+    candidates = _get_candidate_district_names(district_name, district_code)
 
     scored = []
     for q in questionnaires:
@@ -286,21 +392,25 @@ def _filter_questionnaires_by_paa(questionnaires, district_name=None, district_c
 
         q_norm = _normalize_text(q_district)
         q_base_norm = _normalize_text(q_district_base)
+        q_candidates = get_paa_alias_candidates(q_district_base, config=C)
 
         score = 0
         strategy = "no-match"
 
-        if not district_name:
+        if not district_name and not district_code:
             score = 50
             strategy = "no-filter"
-        elif q_norm == district_normalized:
+        elif q_candidates and q_candidates.intersection(candidates):
             score = 100
-            strategy = "exact-match"
-        elif q_base_norm == district_base_normalized:
-            score = 90
-            strategy = "base-match"
-        elif district_base_normalized and (district_base_normalized in q_base_norm):
-            score = 50
+            strategy = "paa-alias-match"
+        elif q_norm in candidates:
+            score = 100
+            strategy = "exact-or-alias-match"
+        elif q_base_norm in candidates:
+            score = 95
+            strategy = "base-or-alias-match"
+        elif any(candidate and (candidate in q_norm or candidate in q_base_norm) for candidate in candidates):
+            score = 60
             strategy = "partial-match"
 
         q2 = dict(q)
@@ -341,20 +451,20 @@ def resolve_available_questionnaires(info, **kwargs):
         if not questionnaires:
             return []
 
-        # --- Zanzibar UI logic ---
-        # If user selected pseudo PAA district codes (9101/9102), match by PAA name
         paa_name = _paa_from_pseudo_district_code(district_code) if district_code else None
         if paa_name:
-            district_name = paa_name  # reuse PAA scoring logic
+            district_name = paa_name
 
-        # If user selected Zanzibar region (code 91) but no district selected,
-        # only show the two PAA questionnaires (UNGUJA + PEMBA)
-        if str(region_code) == "91" and not district_code and not district_name:
+        allowed_scopes = scopes_for_codes([region_code], C)
+        if str(region_code) == "91":
+            allowed_scopes.update(["UNGUJA", "PEMBA"])
+
+        if allowed_scopes and not district_code and not district_name:
             questionnaires = _filter_questionnaires_by_allowed_paas(
-                questionnaires, allowed_paas=["UNGUJA", "PEMBA"]
+                questionnaires,
+                allowed_paas=sorted(allowed_scopes),
             )
         else:
-            # normal behaviour
             if district_code or region_code or district_name:
                 questionnaires = _filter_questionnaires_by_paa(
                     questionnaires,
@@ -363,7 +473,9 @@ def resolve_available_questionnaires(info, **kwargs):
                     region_code=region_code,
                 )
                 if not show_all:
-                    questionnaires = [q for q in questionnaires if q.get("matching_score", 0) > 0]
+                    questionnaires = [
+                        q for q in questionnaires if q.get("matching_score", 0) > 0
+                    ]
 
     except Exception as e:
         LOG.exception("Failed to fetch questionnaires from HQ")
