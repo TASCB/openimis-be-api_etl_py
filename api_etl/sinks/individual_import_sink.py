@@ -13,7 +13,7 @@ from api_etl.sinks.base import DataSink
 from api_etl.apps import ApiEtlConfig as C
 from api_etl.utils import data_to_file
 from individual.services import IndividualImportService
-from individual.models import Individual
+from individual.models import Individual, IndividualDataSourceUpload
 from workflow.services import WorkflowService
 
 LOG = logging.getLogger(__name__)
@@ -334,6 +334,21 @@ class IndividualImportSink(DataSink):
 
         return data_to_file(rows, identifier=filename_hint)
 
+    def _push_import_file(self, method, import_file, workflow, group_col: str) -> Dict[str, Any]:
+        result = method(import_file, workflow, group_col)
+        upload_uuid = ((result or {}).get("data") or {}).get("upload_uuid")
+        if not upload_uuid:
+            if result and result.get("success") is False:
+                raise DataSink.Error(result.get("message") or "Individual import failed")
+            return result or {}
+
+        upload = IndividualDataSourceUpload.objects.filter(uuid=upload_uuid).first()
+        if not upload:
+            raise DataSink.Error(f"Individual import upload not found: {upload_uuid}")
+        if upload.status == IndividualDataSourceUpload.Status.FAIL:
+            raise DataSink.Error(f"Individual import workflow failed: {upload.error}")
+        return result or {}
+
     def push(self, objs: Iterable[Dict[str, Any]], batch_identifier: Optional[str] = None) -> None:
         bid = batch_identifier or self.batch
 
@@ -366,7 +381,7 @@ class IndividualImportSink(DataSink):
             new_group_col = self._choose_group_col(new_fields)
             import_file = self._to_csv_file(new_records, filename_hint=f"{bid or 'bulk'}_new")
             import_wf = self._resolve_workflow(self.import_workflow_cfg)
-            method(import_file, import_wf, new_group_col)
+            self._push_import_file(method, import_file, import_wf, new_group_col)
             LOG.info("IndividualImportSink pushed %s new record(s).", len(new_records))
 
         # EXISTING RECORDS
@@ -375,5 +390,5 @@ class IndividualImportSink(DataSink):
             upd_group_col = self._choose_group_col(upd_fields)
             update_file = self._to_csv_file(existing_records, filename_hint=f"{bid or 'bulk'}_update")
             update_wf = self._resolve_workflow(self.update_workflow_cfg)
-            method(update_file, update_wf, upd_group_col)
+            self._push_import_file(method, update_file, update_wf, upd_group_col)
             LOG.info("IndividualImportSink updated %s existing record(s).", len(existing_records))
