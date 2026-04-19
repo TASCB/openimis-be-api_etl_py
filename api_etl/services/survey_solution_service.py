@@ -562,6 +562,16 @@ class SurveySolutionService(_BaseService):
 
         return False
 
+    def _relationship_to_head_code(self, row: Dict[str, Any]) -> str:
+        if not isinstance(row, dict):
+            return ""
+        lower_map = {(str(k) or "").lstrip("\ufeff").lower(): v for k, v in row.items()}
+        for key in ("rel_to_hhh", "relationshiptohead", "rth"):
+            value = lower_map.get(key)
+            if value is not None and str(value).strip():
+                return str(value).strip()
+        return ""
+
     def _merge_household_roster(
         self, all_rows: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
@@ -646,6 +656,7 @@ class SurveySolutionService(_BaseService):
                         "consent_res": "2",
                         "sex": None,
                         "dob": None,
+                        "_member_ordinal": "01",
                     }
                     merged.append({**hh, **stub_person})
                     LOG.debug(
@@ -662,8 +673,12 @@ class SurveySolutionService(_BaseService):
                     )
                 continue
 
+            relationship_counts: Dict[str, int] = {}
             for p in persons:
-                merged.append({**hh, **p})
+                rel_code = self._relationship_to_head_code(p)
+                relationship_counts[rel_code] = relationship_counts.get(rel_code, 0) + 1
+                member_ordinal = str(relationship_counts[rel_code]).zfill(2)
+                merged.append({**hh, **p, "_member_ordinal": member_ordinal})
 
         LOG.info(
             "Roster merge: %s interviews → %s merged person rows",

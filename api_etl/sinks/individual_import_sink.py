@@ -120,9 +120,9 @@ class IndividualImportSink(DataSink):
         self.lookup_field: str = self.config.get("sink_model_lookup_field", "json_ext__external_id")
         self.update_existing: bool = bool(self.config.get("sink_update_existing", True))
 
-        self.workflow_cfg: Any = self.config.get("sink_workflow", "Python Valid Upload Individuals")
-        self.import_workflow_cfg: Any = self.config.get("sink_import_workflow", self.workflow_cfg)
-        self.update_workflow_cfg: Any = self.config.get("sink_update_workflow", "Python Valid Update Individuals")
+        self.workflow_cfg: Any = self.config.get("sink_workflow") or "Python Valid Upload Individuals"
+        self.import_workflow_cfg: Any = self.config.get("sink_import_workflow") or self.workflow_cfg
+        self.update_workflow_cfg: Any = self.config.get("sink_update_workflow") or "Python Valid Update Individuals"
 
         self.group_aggregation_column: str = self.config.get("sink_group_aggregation_column", "group_code")
         self.csv_fields: Optional[List[str]] = self.config.get("sink_csv_fields")

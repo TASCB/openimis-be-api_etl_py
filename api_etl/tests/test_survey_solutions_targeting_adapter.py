@@ -28,7 +28,7 @@ class SurveySolutionsTargetingAdapterTest(TestCase):
             "firstname": "ZAI",
             "lastname": "SABI",
             "dob": "2000-10-04",
-            "SEX": "2",                         # will become gender_norm = F
+            "SEX": "F",
             "VILLAGE_CODE": "70405101",        # 8 digits -> zfill(9) => "070405101"
             "WARD_CODE": "704051",             # present but unused if village exists
             "TF4_NO": "23",
@@ -61,13 +61,27 @@ class SurveySolutionsTargetingAdapterTest(TestCase):
 
     def test_group_code_uses_p3_prefix_location_code_and_tf4(self):
         """
-        group_code should be P3-<location_code><TF4 zfilled to 4 digits>.
-        Example: P3-0704051010023
+        group_code should be P3-<location_code>-<last 8 interview key digits>.
+        Example: P3-070405101-93844641
         """
         record = self._build_record()
         result = self.adapter.transform(record)
 
-        self.assertEqual(result["group_code"], "P3-0704051010023")
+        self.assertEqual(result["group_code"], "P3-070405101-93844641")
+
+    def test_external_id_uses_group_role_and_member_ordinal(self):
+        record = self._build_record(overrides={"RELATIONSHIPTOHEAD": "1", "_member_ordinal": "1"})
+        result = self.adapter.transform(record)
+
+        self.assertEqual(result["external_id"], "P3-070405101-93844641-1-01")
+        self.assertEqual(result["member_ordinal"], "01")
+
+    def test_external_id_supports_repeated_relationship_occurrences(self):
+        record = self._build_record(overrides={"RELATIONSHIPTOHEAD": "3", "_member_ordinal": "2"})
+        result = self.adapter.transform(record)
+
+        self.assertEqual(result["external_id"], "P3-070405101-93844641-3-02")
+        self.assertEqual(result["individual_role_code"], "3")
 
     def test_role_and_hhrep_mapping(self):
         """

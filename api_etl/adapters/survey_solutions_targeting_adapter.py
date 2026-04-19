@@ -33,6 +33,21 @@ class SurveySolutionsTargetingAdapter(DataAdapter):
     def _digits(val: Any) -> str:
         return "".join(ch for ch in str(val or "") if ch.isdigit())
 
+    def _member_ordinal(self, record: Dict[str, Any]) -> str:
+        explicit = self._get(
+            record,
+            "_member_ordinal",
+            "member_ordinal",
+            "roster_index",
+            "roster__index",
+            "roster__id",
+            "row_index",
+        )
+        digits = self._digits(explicit)
+        if digits:
+            return digits.zfill(2)
+        return "01"
+
     def _map_role(self, rth: Optional[str], gender: Optional[str]) -> Optional[str]:
         c = str(rth or "").strip()
         g = str(gender or "").strip().upper()
@@ -129,6 +144,12 @@ class SurveySolutionsTargetingAdapter(DataAdapter):
         rth_val = str(self._get(record, "rel_to_hhh", "RELATIONSHIPTOHEAD", "RTH") or "").strip()
         role_val = self._map_role(rth_val, gender_norm)
         hhrep_val = str(self._get(record, "hh_rep", "HHREP") or "").strip()
+        member_ordinal = self._member_ordinal(record)
+        member_external_id = (
+            f"{group_code_val}-{rth_val}-{member_ordinal}"
+            if group_code_val and rth_val
+            else ik
+        )
 
         # --- Targeting keys (promote to json_ext TOP LEVEL for GraphQL filtering) ---
         consent_res = self._get(record, "consent_res", "CONSENT_RES", "ss_consent_res")
@@ -142,11 +163,12 @@ class SurveySolutionsTargetingAdapter(DataAdapter):
             "gender": gender_norm,
             "location_code": loc_code_str,
             "location_name": location_name_val,
-            "external_id": ik,
+            "external_id": member_external_id,
             "interview_key": ik,
             "group_code": group_code_val,
             "individual_role": role_val,
             "individual_role_code": rth_val,
+            "member_ordinal": member_ordinal,
             "hhrep": hhrep_val,
         }
 
@@ -171,6 +193,7 @@ class SurveySolutionsTargetingAdapter(DataAdapter):
             "group_code",
             "individual_role",
             "individual_role_code",
+            "member_ordinal",
             "hhrep",
             "interview__key",
             "Interview__Key",
