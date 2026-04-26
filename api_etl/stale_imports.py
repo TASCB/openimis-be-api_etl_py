@@ -9,11 +9,11 @@ from api_etl.models import PulledHistory
 
 
 def fail_stale_running_imports(*, district_code=None, user=None) -> int:
-    timeout_hours = getattr(ApiEtlConfig, "paa_etl_running_timeout_hours", 3)
+    timeout_hours = getattr(ApiEtlConfig, "paa_etl_running_timeout_hours", 6)
     try:
         timeout_hours = float(timeout_hours)
     except (TypeError, ValueError):
-        timeout_hours = 3
+        timeout_hours = 6
 
     if timeout_hours <= 0:
         return 0

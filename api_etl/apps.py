@@ -43,7 +43,7 @@ DEFAULT_CONFIG = {
         "DODOSO LA KAYA - RM4-",
         "DODOSO LA KAYA -RM4-",
     ],
-    "questionnaire_list_cache_seconds": 300,
+    "questionnaire_list_cache_seconds": 500,
     "district_name_suffixes": ["DC", "TC", "MC"],
     "questionnaire_district_aliases": {
         "PEMBA": ["PEMBA", "KASKAZINI PEMBA", "KUSINI PEMBA"],
