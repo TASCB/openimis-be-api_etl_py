@@ -18,7 +18,8 @@ DEFAULT_CONFIG = {
     "export_tab_name_contains": "",  # e.g. "individual_test"
     "export_tmp_dir": "/tmp/ss_exports",
     "export_poll_interval_seconds": 3,
-    "export_timeout_seconds": 900,
+    "export_timeout_seconds": 3600,
+    "export_reuse_latest_on_5xx": True,
     "export_keep_zip": False,
     # --- PAA ETL execution ---
     # When enabled, GraphQL returns immediately and Celery/RabbitMQ runs the import.
@@ -31,7 +32,7 @@ DEFAULT_CONFIG = {
     "paa_etl_task_queue": "",
     # Mark imports still running after this many hours as failed when history is read
     # or before duplicate-running checks are applied. Counts already saved remain visible.
-    "paa_etl_running_timeout_hours": 3,
+    "paa_etl_running_timeout_hours": 12,
     # --- Questionnaire default(s) ---
     "questionnaire_id": "",  # single
     "export_questionnaire_ids": [],  # or multiple

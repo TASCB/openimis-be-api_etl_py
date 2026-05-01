@@ -189,6 +189,7 @@ class PulledQuestionnaireGQLType(graphene.ObjectType):
     paaName = graphene.String()
     numberOfHouseholds = graphene.Int()
     numberOfMembers = graphene.Int()
+    questionnaireVersion = graphene.Int()
     datePulled = graphene.DateTime()
     status = graphene.String()
     errorMessage = graphene.String()
@@ -238,6 +239,7 @@ def resolve_pulled_questionnaires(root, info, **kwargs):
                 numberOfHouseholds=record.number_of_households,
                 numberOfMembers=(record.n_individuals_inserted or 0)
                 + (record.n_individuals_updated or 0),
+                questionnaireVersion=record.questionnaire_version,
                 datePulled=record.date_pulled,
                 status=record.status,
                 errorMessage=record.error_message,
@@ -278,6 +280,7 @@ def _get_fallback_pulled_questionnaires(region_code=None, district_code=None):
                 paaName=data["paa_name"],
                 numberOfHouseholds=len(data["group_codes"]),
                 numberOfMembers=0,
+                questionnaireVersion=None,
                 datePulled=data["date_created"],
                 status="completed",
                 errorMessage=None,

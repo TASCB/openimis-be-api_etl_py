@@ -114,7 +114,7 @@ def get_paa_scope_for_location_code(code: Any, config: Optional[Any] = None) -> 
         if code in data.get("codes", []):
             return scope
 
-    # Zanzibar child locations are commonly coded under the region code prefix:
+    # Zanzibar child locations are coded under the region code prefix:
     # 54 -> 5402 Micheweni, 55 -> 5501..., 51 -> 5101..., etc.
     for scope, data in aliases.items():
         for parent_code in data.get("codes", []):

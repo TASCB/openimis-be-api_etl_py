@@ -6,6 +6,8 @@ import unicodedata
 from typing import Any, Dict, Iterable, List, Optional, DefaultDict, Tuple
 from collections import defaultdict
 
+from django.db import transaction
+
 # PMT enrichment
 from api_etl.workflows.pmt import enrich_rows_with_pmt
 
@@ -1018,19 +1020,22 @@ class SurveySolutionService(_BaseService):
                 "PMT enrichment enabled but there are no transformed rows; skipping enrichment step."
             )
 
-        # Push (chunked) if sink available and not dry-run
+        # Push (chunked) if sink available and not dry-run.
+        # Wrap the whole push loop so a failure in any batch rolls back earlier batches
+        # in the same run — avoids "imported some, then failed" partial state.
         batch_id = get_timestamped_batch_identifier(prefix="ss_individuals_")
         total_pushed = 0
         if self.sink and not dry_run and transformed:
-            if self.batch_size <= 1:
-                self.sink.push(transformed, batch_identifier=batch_id)
-                total_pushed = len(transformed)
-            else:
-                for i in range(0, len(transformed), self.batch_size):
-                    self.sink.push(
-                        transformed[i : i + self.batch_size], batch_identifier=batch_id
-                    )
-                    total_pushed += len(transformed[i : i + self.batch_size])
+            with transaction.atomic():
+                if self.batch_size <= 1:
+                    self.sink.push(transformed, batch_identifier=batch_id)
+                    total_pushed = len(transformed)
+                else:
+                    for i in range(0, len(transformed), self.batch_size):
+                        self.sink.push(
+                            transformed[i : i + self.batch_size], batch_identifier=batch_id
+                        )
+                        total_pushed += len(transformed[i : i + self.batch_size])
 
         summary = {
             "questionnaires": qids,

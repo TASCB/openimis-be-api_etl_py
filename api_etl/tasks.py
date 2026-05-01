@@ -19,6 +19,15 @@ def _username(user) -> Optional[str]:
     return getattr(user, "username", None) or getattr(user, "login_name", None)
 
 
+def _extract_questionnaire_version(questionnaire_id: Optional[str]) -> Optional[int]:
+    if not questionnaire_id or "$" not in str(questionnaire_id):
+        return None
+    try:
+        return int(str(questionnaire_id).rsplit("$", 1)[1])
+    except (TypeError, ValueError):
+        return None
+
+
 def _save_history(history: PulledHistory, user=None, update_fields=None):
     username = _username(user)
     if username:
@@ -197,6 +206,15 @@ def execute_paa_etl_history(history_id: str, user_id: str, params: Dict[str, Any
             error_message = (match_info or {}).get("error") or "No matching questionnaire found"
             _mark_failed(history, error_message, user=user)
             return {"success": False, "message": error_message}
+
+        if (
+            questionnaire_id
+            and not (match_info or {}).get("questionnaire_version")
+        ):
+            match_info = {
+                **(match_info or {}),
+                "questionnaire_version": _extract_questionnaire_version(questionnaire_id),
+            }
 
         history.questionnaire_id = questionnaire_id
         history.questionnaire_title = (match_info or {}).get("questionnaire_title")
