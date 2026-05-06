@@ -151,6 +151,7 @@ def enrich_rows_with_pmt(
         return rows
 
     key_name = (hh_key or DEFAULT_HH_KEY or "interview_key")
+    cutoff = _current_cutoff()
 
     groups: dict[str, list[dict[str, Any]]] = {}
     for r in rows:
@@ -186,11 +187,15 @@ def enrich_rows_with_pmt(
             jx["pmt_score"] = score
             if cls is not None:
                 jx["pmt_class"] = cls
+            if cutoff is not None:
+                jx["pmt_cutoff_used"] = float(cutoff)
             r["json_ext"] = jx
 
             # Emit top-level too (preferred for CSV → Json_ext ingestion)
             r["pmt_score"] = score
             if cls is not None:
                 r["pmt_class"] = cls
+            if cutoff is not None:
+                r["pmt_cutoff_used"] = float(cutoff)
 
     return rows
