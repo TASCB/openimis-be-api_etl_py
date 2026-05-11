@@ -299,3 +299,51 @@ def run_paa_etl_task(self, history_id: str, user_id: str, params: Dict[str, Any]
         params.get("district_code"),
     )
     return execute_paa_etl_history(history_id, user_id, params)
+
+
+@shared_task(name="api_etl.poll_survey_dashboard")
+def poll_survey_dashboard_task(questionnaire_id: Optional[str] = None):
+    """Poll Survey Solutions HQ for the monitoring dashboard and refresh the cache."""
+    from api_etl.services.survey_dashboard_service import refresh_dashboard
+
+    try:
+        return refresh_dashboard(questionnaire_id=questionnaire_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Survey dashboard poll task failed: %s", exc)
+        return {"error": str(exc)}
+
+
+def poll_survey_dashboard_periodic(*args, **kwargs):
+    """
+    Plain (non-Celery) callable for the openIMIS APScheduler — wired via
+    ``SCHEDULER_JOBS`` so the Survey Monitoring dashboard refreshes (and its daily
+    snapshot gets written) on a fixed interval, without anyone having the page open.
+
+    Fully guarded: this runs inside the app's scheduler thread, so it must never
+    raise. Honours ``dashboard_enabled`` in the api_etl module config.
+    """
+    try:
+        from django.db import close_old_connections
+        close_old_connections()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from api_etl.apps import ApiEtlConfig
+        if not getattr(ApiEtlConfig, "dashboard_enabled", True):
+            return {"skipped": "dashboard_enabled is false"}
+        from api_etl.services.survey_dashboard_service import refresh_dashboard
+        result = refresh_dashboard()
+        logger.info(
+            "Survey dashboard scheduled poll: totalCount=%s, sampled=%s",
+            (result or {}).get("total_count"), (result or {}).get("seen"),
+        )
+        return result
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Survey dashboard scheduled poll failed: %s", exc, exc_info=True)
+        return {"error": str(exc)}
+    finally:
+        try:
+            from django.db import close_old_connections
+            close_old_connections()
+        except Exception:  # noqa: BLE001
+            pass

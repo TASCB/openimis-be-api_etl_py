@@ -1,6 +1,6 @@
 from django.contrib import admin, messages
 from django.contrib.admin.sites import AlreadyRegistered
-from .models import SurveySolutionsConfig
+from .models import SurveySolutionsConfig, SurveyInterviewCache, SurveyDashboardSnapshot
 
 
 def _get_source():
@@ -103,11 +103,38 @@ class SurveySolutionsConfigAdmin(admin.ModelAdmin):
     refresh_titles.short_description = "Refresh cached questionnaire titles"
 
 
+class SurveyInterviewCacheAdmin(admin.ModelAdmin):
+    list_display = (
+        "interview_key", "status", "responsible_name", "supervisor_name",
+        "questionnaire_title", "status_changed_at", "updated_at",
+    )
+    list_filter = ("status", "responsible_role")
+    search_fields = ("interview_key", "interview_id", "responsible_name", "supervisor_name")
+    readonly_fields = ("first_seen_at", "updated_at")
+
+
+class SurveyDashboardSnapshotAdmin(admin.ModelAdmin):
+    list_display = (
+        "snapshot_date", "questionnaire_id", "total_interviews", "completed",
+        "approved_by_supervisor", "approved_by_hq", "cumulative_completed", "active_enumerators",
+    )
+    list_filter = ("questionnaire_id",)
+    ordering = ("-snapshot_date",)
+
+
 # --- Register on the default admin site ---
 try:
     admin.site.register(SurveySolutionsConfig, SurveySolutionsConfigAdmin)
 except AlreadyRegistered:
     pass
+for _model, _admin in (
+    (SurveyInterviewCache, SurveyInterviewCacheAdmin),
+    (SurveyDashboardSnapshot, SurveyDashboardSnapshotAdmin),
+):
+    try:
+        admin.site.register(_model, _admin)
+    except AlreadyRegistered:
+        pass
 
 # --- ALSO register on common custom AdminSite instances used by openIMIS ---
 _CANDIDATE_SITES = [

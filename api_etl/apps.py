@@ -174,8 +174,10 @@ DEFAULT_CONFIG = {
     # Grouping column for bulk importer (fallback handled in sink)
     "sink_group_aggregation_column": "location_code",
     # CSV columns passed to bulk importer.
-    # Includes group_code & individual_code so the UI/importer can surface them,
-    # and external_id + json_ext for idempotency + no-loss payload.
+    # Includes group_code, individual_role, individual_role_code, and hhrep so
+    # the role/recipient mapping at group-link time can see them in
+    # Individual.Json_ext, plus external_id + json_ext for idempotency +
+    # no-loss payload.
     "sink_csv_fields": [
         "first_name",
         "last_name",
@@ -187,12 +189,40 @@ DEFAULT_CONFIG = {
         "email",
         "interview_key",
         "group_code",
-        "individual_code",
+        "individual_role",
+        "individual_role_code",
+        "hhrep",
         "external_id",
         "json_ext",
     ],
     # Optional: auto-trigger the workflow after upload
     "sink_trigger_workflow_after_upload": False,
+    # --- Real-time Survey Monitoring Dashboard ---
+    "dashboard_enabled": True,
+    # How "fresh" the cache must be before a dashboard query self-heals (seconds).
+    "dashboard_poll_interval_seconds": 60,
+    # Page size when paging the HQ /api/v1/interviews endpoint.
+    "dashboard_interview_page_size": 200,
+    # Safety cap so a runaway HQ doesn't blow up memory.
+    "dashboard_max_interviews": 50000,
+    # Planned target total for the cumulative completion (S-curve) chart; 0 = auto.
+    "dashboard_target_total": 0,
+    # An enumerator counts as "active" if they synced within this many hours.
+    "dashboard_active_window_hours": 24,
+    # Number of recent interview cards to show in the live feed.
+    "dashboard_feed_size": 50,
+    # Headline KPIs come from cheap per-status TotalCount queries; the live feed /
+    # leaderboard / heatmap come from a *bounded sample* of interview briefs (HQ
+    # offers no recency sort, so we sample a few pages per "interesting" status).
+    "dashboard_sample_size": 350,
+    # Cap on cached rows scanned in Python when building the leaderboard/heatmap.
+    "dashboard_metrics_row_cap": 5000,
+    # HQ HTTP timeouts (seconds): short connect so an unreachable HQ fails fast.
+    "dashboard_hq_connect_timeout": 5,
+    "dashboard_hq_read_timeout": 60,
+    # After a failed poll, wait this long before the dashboard self-heal re-polls
+    # (keeps an unreachable HQ from stalling every page load on the connect timeout).
+    "dashboard_poll_fail_backoff_seconds": 300,
     # --- GraphQL perms ---
     "gql_query_api_etl_rule_perms": ["953001"],
     "gql_mutation_execute_api_etl_rule_perms": ["953002"],

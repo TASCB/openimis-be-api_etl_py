@@ -499,3 +499,199 @@ def resolve_available_questionnaires(info, **kwargs):
             )
         )
     return results
+
+
+# =============================================================================
+# Real-time Survey Monitoring Dashboard — GraphQL types & resolvers
+# =============================================================================
+class SurveyDailyCountGQLType(graphene.ObjectType):
+    date = graphene.String()
+    count = graphene.Int()
+    cumulative = graphene.Int()
+
+
+class SurveyFunnelStageGQLType(graphene.ObjectType):
+    stage = graphene.String()
+    count = graphene.Int()
+
+
+class SurveyEnumeratorStatGQLType(graphene.ObjectType):
+    name = graphene.String()
+    supervisor_name = graphene.String()
+    completed = graphene.Int()
+    approved_by_supervisor = graphene.Int()
+    approved_by_hq = graphene.Int()
+    rejected = graphene.Int()
+    total = graphene.Int()
+    last_activity = graphene.String()
+
+
+class SurveyHeatmapCellGQLType(graphene.ObjectType):
+    day_of_week = graphene.Int()
+    hour = graphene.Int()
+    count = graphene.Int()
+
+
+class SurveyQuestionnaireOptionGQLType(graphene.ObjectType):
+    identity = graphene.String()
+    id = graphene.String()
+    version = graphene.Int()
+    title = graphene.String()
+    count = graphene.Int()
+
+
+class SurveyInterviewGQLType(graphene.ObjectType):
+    interview_id = graphene.String()
+    interview_key = graphene.String()
+    questionnaire_id = graphene.String()
+    questionnaire_title = graphene.String()
+    questionnaire_version = graphene.Int()
+    assignment_id = graphene.Int()
+    responsible_name = graphene.String()
+    responsible_role = graphene.String()
+    supervisor_name = graphene.String()
+    status = graphene.String()
+    errors_count = graphene.Int()
+    not_answered_count = graphene.Int()
+    created_at_utc = graphene.String()
+    last_entry_at_utc = graphene.String()
+    status_changed_at = graphene.String()
+    duration_minutes = graphene.Float()
+
+
+class SurveyDashboardMetricsGQLType(graphene.ObjectType):
+    total_interviews = graphene.Int()
+    in_progress = graphene.Int()
+    completed = graphene.Int()
+    approved_by_supervisor = graphene.Int()
+    approved_by_hq = graphene.Int()
+    sent_to_capital = graphene.Int()
+    rejected_by_supervisor = graphene.Int()
+    rejected_by_hq = graphene.Int()
+    rejection_rate = graphene.Float()
+    supervisor_backlog = graphene.Int()
+    hq_backlog = graphene.Int()
+    pending_review_backlog = graphene.Int()
+    avg_interview_duration_minutes = graphene.Float()
+    active_enumerators = graphene.Int()
+    target_total = graphene.Int()
+    sample_size = graphene.Int()
+    hq_base_url = graphene.String()
+    last_polled_at = graphene.String()
+    questionnaires = graphene.List(SurveyQuestionnaireOptionGQLType)
+    daily_productivity = graphene.List(SurveyDailyCountGQLType)
+    completion_series = graphene.List(SurveyDailyCountGQLType)
+    approval_funnel = graphene.List(SurveyFunnelStageGQLType)
+    enumerator_leaderboard = graphene.List(SurveyEnumeratorStatGQLType)
+    activity_heatmap = graphene.List(SurveyHeatmapCellGQLType)
+
+
+def _iso(value):
+    if not value:
+        return None
+    try:
+        return value.isoformat()
+    except AttributeError:
+        return str(value)
+
+
+def resolve_survey_dashboard(info, **kwargs):
+    from api_etl.services import survey_dashboard_service as svc
+
+    questionnaire_id = kwargs.get("questionnaire_id") or kwargs.get("questionnaireId")
+
+    # Self-heal: if the cache is stale, kick off a (non-blocking) poll.
+    try:
+        svc.maybe_async_refresh(questionnaire_id=questionnaire_id)
+    except Exception:  # noqa: BLE001
+        pass
+
+    m = svc.compute_metrics(questionnaire_id=questionnaire_id)
+    return SurveyDashboardMetricsGQLType(
+        total_interviews=m["totalInterviews"],
+        in_progress=m["inProgress"],
+        completed=m["completed"],
+        approved_by_supervisor=m["approvedBySupervisor"],
+        approved_by_hq=m["approvedByHq"],
+        sent_to_capital=m["sentToCapital"],
+        rejected_by_supervisor=m["rejectedBySupervisor"],
+        rejected_by_hq=m["rejectedByHq"],
+        rejection_rate=m["rejectionRate"],
+        supervisor_backlog=m["supervisorBacklog"],
+        hq_backlog=m["hqBacklog"],
+        pending_review_backlog=m["pendingReviewBacklog"],
+        avg_interview_duration_minutes=m["avgInterviewDurationMinutes"],
+        active_enumerators=m["activeEnumerators"],
+        target_total=m["targetTotal"],
+        sample_size=m.get("sampleSize", 0),
+        hq_base_url=m.get("hqBaseUrl") or "",
+        last_polled_at=m["lastPolledAt"],
+        questionnaires=[
+            SurveyQuestionnaireOptionGQLType(
+                identity=q.get("identity"), id=q.get("id"), version=q.get("version"),
+                title=q.get("title"), count=q.get("count", 0),
+            )
+            for q in m.get("questionnaires", [])
+        ],
+        daily_productivity=[SurveyDailyCountGQLType(**d) for d in m["dailyProductivity"]],
+        completion_series=[SurveyDailyCountGQLType(**d) for d in m["completionSeries"]],
+        approval_funnel=[SurveyFunnelStageGQLType(**d) for d in m["approvalFunnel"]],
+        enumerator_leaderboard=[
+            SurveyEnumeratorStatGQLType(
+                name=d["name"],
+                supervisor_name=d["supervisorName"],
+                completed=d["completed"],
+                approved_by_supervisor=d["approvedBySupervisor"],
+                approved_by_hq=d["approvedByHq"],
+                rejected=d["rejected"],
+                total=d["total"],
+                last_activity=d["lastActivity"],
+            )
+            for d in m["enumeratorLeaderboard"]
+        ],
+        activity_heatmap=[
+            SurveyHeatmapCellGQLType(day_of_week=d["dayOfWeek"], hour=d["hour"], count=d["count"])
+            for d in m["activityHeatmap"]
+        ],
+    )
+
+
+def resolve_survey_interviews(info, **kwargs):
+    from api_etl.services import survey_dashboard_service as svc
+
+    questionnaire_id = kwargs.get("questionnaire_id") or kwargs.get("questionnaireId")
+    status = kwargs.get("status")
+    responsible_name = kwargs.get("responsible_name") or kwargs.get("responsibleName")
+    search = kwargs.get("search")
+    from_date = kwargs.get("from_date") or kwargs.get("fromDate")
+    limit = kwargs.get("limit") or kwargs.get("first") or 50
+
+    rows = svc.list_interviews(
+        questionnaire_id=questionnaire_id,
+        status=status,
+        responsible_name=responsible_name,
+        search=search,
+        from_date=from_date,
+        limit=limit,
+    )
+    return [
+        SurveyInterviewGQLType(
+            interview_id=r.interview_id,
+            interview_key=r.interview_key,
+            questionnaire_id=r.questionnaire_id,
+            questionnaire_title=r.questionnaire_title,
+            questionnaire_version=r.questionnaire_version,
+            assignment_id=r.assignment_id,
+            responsible_name=r.responsible_name,
+            responsible_role=r.responsible_role,
+            supervisor_name=r.supervisor_name,
+            status=r.status,
+            errors_count=r.errors_count,
+            not_answered_count=r.not_answered_count,
+            created_at_utc=_iso(r.created_at_utc),
+            last_entry_at_utc=_iso(r.last_entry_at_utc),
+            status_changed_at=_iso(r.status_changed_at),
+            duration_minutes=r.duration_minutes,
+        )
+        for r in rows
+    ]

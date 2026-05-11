@@ -257,3 +257,50 @@ class PAABasedETLMutation(BaseMutation):
         finally:
             # CLEANUP: Clear current user after mutation completes
             clear_current_user()
+
+
+class RefreshSurveyDashboardMutation(graphene.Mutation):
+    """
+    Force an immediate poll of the Survey Solutions HQ ``/api/v1/interviews``
+    endpoint and refresh the monitoring-dashboard cache. Returns the poll
+    summary so the frontend can show "synced N interviews".
+    """
+
+    class Arguments:
+        questionnaire_id = graphene.String(required=False)
+
+    success = graphene.Boolean()
+    seen = graphene.Int()
+    created = graphene.Int()
+    changed = graphene.Int()
+    total_count = graphene.Int()
+    polled_at = graphene.String()
+    message = graphene.String()
+
+    @classmethod
+    def mutate(cls, root, info, questionnaire_id=None):
+        user = info.context.user
+        if (
+            type(user) is AnonymousUser
+            or not getattr(user, "id", None)
+            or not user.has_perms(ApiEtlConfig.gql_mutation_execute_api_etl_rule_perms)
+        ):
+            raise PermissionError("Unauthorized")
+        try:
+            from api_etl.services.survey_dashboard_service import refresh_dashboard
+
+            result = refresh_dashboard(questionnaire_id=questionnaire_id)
+            return cls(
+                success=True,
+                seen=result.get("seen", 0),
+                created=result.get("created", 0),
+                changed=result.get("changed", 0),
+                total_count=result.get("total_count"),
+                polled_at=result.get("polled_at"),
+                message="ok",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Failed to refresh survey dashboard")
+            return cls(
+                success=False, seen=0, created=0, changed=0, total_count=None, polled_at=None, message=str(exc),
+            )

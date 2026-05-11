@@ -275,3 +275,101 @@ class PulledHistory(HistoryModel):
             user_initiated=user,
             **kwargs,
         )
+
+
+# ---------------------------------------------------------------------------
+# Real-time Survey Monitoring Dashboard
+# ---------------------------------------------------------------------------
+class SurveyInterviewCache(models.Model):
+    """
+    Local cache of interview "briefs" pulled from the Survey Solutions HQ
+    ``/api/v1/interviews`` endpoint by the dashboard poller.
+
+    One row per interview. The poller upserts on ``interview_id`` and records
+    ``status_changed_at`` whenever the HQ status differs from what we last saw,
+    so the dashboard can show a live activity feed and detect bottlenecks
+    without Survey Solutions having to push webhooks.
+    """
+
+    interview_id = models.CharField(max_length=64, unique=True, db_index=True)
+    interview_key = models.CharField(max_length=64, blank=True, null=True, db_index=True)
+
+    questionnaire_id = models.CharField(max_length=200, blank=True, null=True, db_index=True)
+    questionnaire_title = models.CharField(max_length=500, blank=True, null=True)
+    questionnaire_version = models.IntegerField(blank=True, null=True)
+    assignment_id = models.IntegerField(blank=True, null=True)
+
+    responsible_id = models.CharField(max_length=64, blank=True, null=True)
+    responsible_name = models.CharField(max_length=255, blank=True, null=True, db_index=True)
+    responsible_role = models.CharField(max_length=50, blank=True, null=True)
+    supervisor_name = models.CharField(max_length=255, blank=True, null=True, db_index=True)
+
+    status = models.CharField(max_length=50, blank=True, null=True, db_index=True)
+    errors_count = models.IntegerField(default=0)
+    not_answered_count = models.IntegerField(default=0)
+
+    created_at_utc = models.DateTimeField(blank=True, null=True)
+    last_entry_at_utc = models.DateTimeField(blank=True, null=True)
+    server_updated_at_utc = models.DateTimeField(blank=True, null=True)
+
+    # When *we* first observed the current status (used for the live feed).
+    status_changed_at = models.DateTimeField(blank=True, null=True, db_index=True)
+    first_seen_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    # Rough proxy: minutes between creation and last entry.
+    duration_minutes = models.FloatField(blank=True, null=True)
+
+    json_ext = models.JSONField(db_column="Json_ext", blank=True, default=dict)
+
+    class Meta:
+        verbose_name = "Survey Interview (cache)"
+        verbose_name_plural = "Survey Interviews (cache)"
+        ordering = ["-status_changed_at", "-updated_at"]
+        indexes = [
+            models.Index(fields=["status", "questionnaire_id"], name="api_etl_sic_status_qid_idx"),
+            models.Index(fields=["responsible_name"], name="api_etl_sic_resp_idx"),
+            models.Index(fields=["status_changed_at"], name="api_etl_sic_changed_idx"),
+            models.Index(fields=["last_entry_at_utc"], name="api_etl_sic_lastentry_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.interview_key or self.interview_id} [{self.status}]"
+
+
+class SurveyDashboardSnapshot(models.Model):
+    """
+    Daily aggregate snapshot used to draw trend / S-curve charts. One row per
+    (date, questionnaire_id). ``questionnaire_id`` is the empty string for the
+    "all questionnaires" rollup so the unique constraint behaves across DBs.
+    """
+
+    snapshot_date = models.DateField(db_index=True)
+    questionnaire_id = models.CharField(max_length=200, blank=True, default="", db_index=True)
+
+    total_interviews = models.IntegerField(default=0)
+    in_progress = models.IntegerField(default=0)
+    completed = models.IntegerField(default=0)
+    approved_by_supervisor = models.IntegerField(default=0)
+    approved_by_hq = models.IntegerField(default=0)
+    sent_to_capital = models.IntegerField(default=0)
+    rejected_by_supervisor = models.IntegerField(default=0)
+    rejected_by_hq = models.IntegerField(default=0)
+
+    # Cumulative "completed or beyond" (used directly for the S-curve).
+    cumulative_completed = models.IntegerField(default=0)
+
+    active_enumerators = models.IntegerField(default=0)
+    json_ext = models.JSONField(db_column="Json_ext", blank=True, default=dict)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Survey Dashboard Snapshot"
+        verbose_name_plural = "Survey Dashboard Snapshots"
+        ordering = ["-snapshot_date"]
+        unique_together = [("snapshot_date", "questionnaire_id")]
+
+    def __str__(self):
+        return f"{self.snapshot_date} ({self.questionnaire_id or 'ALL'})"
