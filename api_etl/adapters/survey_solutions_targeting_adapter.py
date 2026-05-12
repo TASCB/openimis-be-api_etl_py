@@ -185,6 +185,10 @@ class SurveySolutionsTargetingAdapter(DataAdapter):
             json_ext["record_type"] = str(record_type)
         if pssn_wave is not None and str(pssn_wave).strip() != "":
             json_ext["pssn_wave"] = str(pssn_wave)
+        # Promote normalized gender ("M"/"F") to top-level json_ext so it can be
+        # indexed in OpenSearch (individual.gender) and filtered in GraphQL.
+        if gender_norm:
+            json_ext["gender"] = gender_norm
 
         # Avoid duplicating authoritative fields inside raw
         forbidden = {

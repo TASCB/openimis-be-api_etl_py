@@ -18,13 +18,17 @@ from workflow.services import WorkflowService
 
 LOG = logging.getLogger(__name__)
 
-# Hard exclude these keys from CSV headers (never as CSV columns)
+# Hard exclude these keys from being picked up as CSV columns by the generic
+# field sniffer. gender is here too: it only becomes a CSV column via the
+# explicit PROMOTED_JSON_EXT_FIELDS path below, i.e. only when an adapter put a
+# normalized value under json_ext["gender"] (the SS targeting adapter does).
 CSV_FIELD_DENYLIST = {"raw", "_source", "phone", "email", "gender"}
 
 # These are stored inside the adapter json_ext payload, but the individual
 # import workflow also needs them as normal CSV columns so they land flat in
-# Individual.json_ext and can use the existing consent_res index.
-PROMOTED_JSON_EXT_FIELDS = ("consent_res", "record_type", "pssn_wave")
+# Individual.json_ext (used by the consent_res index and the OpenSearch
+# individual.gender mapping).
+PROMOTED_JSON_EXT_FIELDS = ("consent_res", "record_type", "pssn_wave", "gender")
 
 DEFAULT_DOB_SENTINEL = "1900-07-01"
 
