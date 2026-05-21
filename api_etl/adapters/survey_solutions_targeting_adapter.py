@@ -52,6 +52,8 @@ class SurveySolutionsTargetingAdapter(DataAdapter):
         c = str(rth or "").strip()
         g = str(gender or "").strip().upper()
 
+        if not c:
+            return None
         if c == "1":
             return "HEAD"
         if c == "2":
@@ -66,6 +68,8 @@ class SurveySolutionsTargetingAdapter(DataAdapter):
             return "FATHER" if g == "M" else "MOTHER" if g == "F" else "OTHER RELATIVE"
         if c == "12":
             return "SPOUSE"
+        if c == "14":
+            return "NOT RELATED"
         return "OTHER RELATIVE"
 
     @staticmethod

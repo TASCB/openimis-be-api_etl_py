@@ -96,6 +96,46 @@ class SurveySolutionsTargetingAdapterTest(TestCase):
         self.assertEqual(result["individual_role"], "SISTER")
         self.assertEqual(result["hhrep"], "1")
 
+    def test_role_mapping_covers_non_head_household_members(self):
+        cases = [
+            ({"RELATIONSHIPTOHEAD": "3", "SEX": "M"}, "SON"),
+            ({"RELATIONSHIPTOHEAD": "3", "SEX": "F"}, "DAUGHTER"),
+            ({"RELATIONSHIPTOHEAD": "4", "SEX": "M"}, "SON"),
+            ({"RELATIONSHIPTOHEAD": "4", "SEX": "F"}, "DAUGHTER"),
+            ({"RELATIONSHIPTOHEAD": "5", "SEX": "M"}, "BROTHER"),
+            ({"RELATIONSHIPTOHEAD": "5", "SEX": "F"}, "SISTER"),
+            ({"RELATIONSHIPTOHEAD": "6", "SEX": "M"}, "GRANDSON"),
+            ({"RELATIONSHIPTOHEAD": "6", "SEX": "F"}, "GRANDDAUGHTER"),
+            ({"RELATIONSHIPTOHEAD": "7", "SEX": "M"}, "FATHER"),
+            ({"RELATIONSHIPTOHEAD": "7", "SEX": "F"}, "MOTHER"),
+            ({"RELATIONSHIPTOHEAD": "12", "SEX": "F"}, "SPOUSE"),
+            ({"RELATIONSHIPTOHEAD": "14", "SEX": "F"}, "NOT RELATED"),
+            ({"RELATIONSHIPTOHEAD": "99", "SEX": "F"}, "OTHER RELATIVE"),
+        ]
+
+        for overrides, expected_role in cases:
+            with self.subTest(overrides=overrides, expected_role=expected_role):
+                result = self.adapter.transform(self._build_record(overrides=overrides))
+                self.assertEqual(result["individual_role"], expected_role)
+
+    def test_role_mapping_falls_back_to_other_relative_when_gender_missing(self):
+        cases = ["3", "4", "5", "6", "7"]
+
+        for relationship_code in cases:
+            with self.subTest(relationship_code=relationship_code):
+                result = self.adapter.transform(
+                    self._build_record(overrides={"RELATIONSHIPTOHEAD": relationship_code, "SEX": None}),
+                )
+                self.assertEqual(result["individual_role"], "OTHER RELATIVE")
+
+    def test_role_mapping_returns_none_when_relationship_code_missing(self):
+        result = self.adapter.transform(
+            self._build_record(overrides={"RELATIONSHIPTOHEAD": None}),
+        )
+
+        self.assertEqual(result["individual_role_code"], "")
+        self.assertIsNone(result["individual_role"])
+
     def test_json_ext_structure_and_raw_payload(self):
         """
         json_ext should:

@@ -302,12 +302,12 @@ def run_paa_etl_task(self, history_id: str, user_id: str, params: Dict[str, Any]
 
 
 @shared_task(name="api_etl.poll_survey_dashboard")
-def poll_survey_dashboard_task(questionnaire_id: Optional[str] = None):
+def poll_survey_dashboard_task(questionnaire_id: Optional[str] = None, with_sample: bool = True):
     """Poll Survey Solutions HQ for the monitoring dashboard and refresh the cache."""
     from api_etl.services.survey_dashboard_service import refresh_dashboard
 
     try:
-        return refresh_dashboard(questionnaire_id=questionnaire_id)
+        return refresh_dashboard(questionnaire_id=questionnaire_id, with_sample=with_sample)
     except Exception as exc:  # noqa: BLE001
         logger.exception("Survey dashboard poll task failed: %s", exc)
         return {"error": str(exc)}

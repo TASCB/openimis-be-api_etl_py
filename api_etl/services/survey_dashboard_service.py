@@ -27,13 +27,15 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from datetime import timedelta, timezone as dt_timezone, date as date_cls
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 import requests
+from requests import HTTPError
 from django.conf import settings
 from django.core.cache import cache
 from django.db import transaction
 from django.db.models import Count
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime, parse_date
 
@@ -182,6 +184,10 @@ def _to_int(v, default=0):
         return default
 
 
+def _normalize_name(value: Any) -> str:
+    return " ".join(str(value or "").strip().lower().split())
+
+
 # --------------------------------------------------------------------------- #
 # HQ client (reuses the ETL connection settings)
 # --------------------------------------------------------------------------- #
@@ -218,6 +224,60 @@ def _hq_request_kwargs() -> Dict[str, Any]:
         password=_cfg("auth_basic_password"),
         bearer=_cfg("auth_bearer_token"),
     )
+
+
+def _hq_json_get(path: str, *, params: Optional[Dict[str, Any]] = None) -> Any:
+    endpoint_base = _hq_endpoint_base()
+    if not endpoint_base:
+        raise ValueError("Survey Solutions HQ base URL is not configured (export_base_url).")
+    url = f"{endpoint_base}/{path.lstrip('/')}"
+    rkwargs = _hq_request_kwargs()
+    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+    if "headers" in rkwargs:
+        headers.update(rkwargs["headers"])
+    rkwargs = {k: v for k, v in rkwargs.items() if k != "headers"}
+    r = requests.get(url, params=params or None, headers=headers, timeout=_hq_timeout(), **rkwargs)
+    r.raise_for_status()
+    return r.json()
+
+
+def _payload_items(payload: Any, *, item_keys: Optional[List[str]] = None) -> Tuple[List[Dict[str, Any]], Optional[int]]:
+    keys = item_keys or ["Items", "items", "Interviews", "interviews", "Questionnaires", "questionnaires",
+                         "Supervisors", "supervisors", "Interviewers", "interviewers", "Users", "users"]
+    if isinstance(payload, dict):
+        items = None
+        for key in keys:
+            cand = payload.get(key)
+            if isinstance(cand, list):
+                items = cand
+                break
+        if items is None:
+            items = payload if all(isinstance(v, list) is False for v in payload.values()) else []
+        total = payload.get("TotalCount")
+        try:
+            total = int(total) if total is not None else None
+        except (TypeError, ValueError):
+            total = None
+        return [x for x in items if isinstance(x, dict)], total
+    if isinstance(payload, list):
+        return [x for x in payload if isinstance(x, dict)], None
+    return [], None
+
+
+def _hq_paged_items(path: str, *, params: Optional[Dict[str, Any]] = None, item_keys: Optional[List[str]] = None,
+                    page_size: int = 200, max_pages: int = 20) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for page in range(1, max_pages + 1):
+        payload = _hq_json_get(path, params={**(params or {}), "limit": page_size, "offset": page})
+        items, total = _payload_items(payload, item_keys=item_keys)
+        if not items:
+            break
+        rows.extend(items)
+        if total is not None and len(rows) >= total:
+            break
+        if len(items) < page_size:
+            break
+    return rows
 
 
 def _interviews_request(params: Dict[str, Any]):
@@ -323,6 +383,338 @@ def fetch_status_counts(questionnaire_id: Optional[str] = None) -> Dict[str, int
         questionnaire_id or "ALL", counts, grand_total, sum(counts.values()),
     )
     return counts
+
+
+def _direct_metric_row(obj: Dict[str, Any]) -> Dict[str, float]:
+    row: Dict[str, float] = {}
+    for key, value in obj.items():
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        lk = str(key).strip().lower().replace("_", "")
+        if lk in {"sum", "total", "totalvalue", "sumvalue"} or lk.endswith("sum"):
+            row["sum"] = float(value)
+        elif lk in {"count", "cases", "interviews", "totalcount", "validcount", "responsescount"} or lk.endswith("count"):
+            row["count"] = float(value)
+        elif lk in {"average", "avg", "mean"} or "average" in lk:
+            row["average"] = float(value)
+    return row
+
+
+def _collect_metric_rows(payload: Any) -> List[Dict[str, float]]:
+    rows: List[Dict[str, float]] = []
+    if isinstance(payload, dict):
+        direct = _direct_metric_row(payload)
+        if direct:
+            rows.append(direct)
+        else:
+            for value in payload.values():
+                if isinstance(value, (dict, list)):
+                    rows.extend(_collect_metric_rows(value))
+    elif isinstance(payload, list):
+        for item in payload:
+            rows.extend(_collect_metric_rows(item))
+    return rows
+
+
+def _stats_qid(guid: Optional[str]) -> Optional[str]:
+    if not guid:
+        return None
+    return str(guid).replace("-", "")
+
+
+def _household_metric_cache_key(questionnaire_id: Optional[str]) -> str:
+    guid, version = _split_qid(questionnaire_id)
+    if guid:
+        return f"api_etl:survey_dashboard:hhsize:{guid}${version if version is not None else ''}"
+    return "api_etl:survey_dashboard:hhsize:ALL"
+
+
+def _load_household_metric(questionnaire_id: Optional[str]) -> Dict[str, Any]:
+    guid, version = _split_qid(questionnaire_id)
+    variable = str(_cfg("dashboard_household_size_variable", "hh_size") or "hh_size")
+    if not guid or version is None:
+        totals = 0
+        counts = 0
+        seen = 0
+        for q in list_dashboard_questionnaires():
+            identity = q.get("identity")
+            if not identity:
+                continue
+            cached = cache.get(_household_metric_cache_key(identity))
+            if not isinstance(cached, dict) or cached.get("total") is None:
+                continue
+            totals += int(cached.get("total") or 0)
+            counts += int(cached.get("count") or 0)
+            seen += 1
+        return {
+            "total": totals if seen else None,
+            "average": round(totals / counts, 1) if counts else None,
+            "count": counts if seen else None,
+            "variable": variable,
+        }
+    cached = cache.get(_household_metric_cache_key(questionnaire_id))
+    if isinstance(cached, dict):
+        return cached
+    return {"total": None, "average": None, "count": None, "variable": variable}
+
+
+def _fetch_household_metric_rows(questionnaire_id: Optional[str], token: str) -> List[Dict[str, float]]:
+    guid, version = _split_qid(questionnaire_id)
+    if not guid:
+        return []
+    params = {
+        "QuestionnaireId": _stats_qid(guid),
+        "Question": token,
+        "Min": 0,
+        "PageSize": 5000,
+        "PageIndex": 1,
+    }
+    if version is not None:
+        params["Version"] = version
+    try:
+        payload = _hq_json_get("statistics", params=params)
+        return _collect_metric_rows(payload)
+    except HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else None
+        if status in (404, 500):
+            LOG.debug("Survey dashboard: statistics endpoint unavailable questionnaireId=%s token=%s status=%s", questionnaire_id, token, status)
+            return []
+        LOG.warning("Survey dashboard: household-size statistics request failed questionnaireId=%s token=%s status=%s", questionnaire_id, token, status, exc_info=True)
+        return []
+    except Exception:
+        LOG.warning("Survey dashboard: household-size statistics request failed questionnaireId=%s token=%s", questionnaire_id, token, exc_info=True)
+        return []
+
+
+def _find_household_question_token(questionnaire_id: Optional[str]) -> Optional[str]:
+    guid, version = _split_qid(questionnaire_id)
+    if not guid or version is None:
+        return None
+    variable = str(_cfg("dashboard_household_size_variable", "hh_size") or "hh_size").strip().lower()
+    explicit = str(_cfg("dashboard_household_size_question_key", "") or "").strip()
+    if explicit:
+        return explicit
+    try:
+        payload = _hq_json_get("statistics/questions", params={"questionnaireId": _stats_qid(guid), "version": version})
+    except Exception:
+        LOG.debug("Survey dashboard: statistics questions request failed questionnaireId=%s", questionnaire_id, exc_info=True)
+        return None
+    items, _total = _payload_items(payload, item_keys=["Items", "items"])
+    if not items and isinstance(payload, list):
+        items = [x for x in payload if isinstance(x, dict)]
+    fallback = None
+    for node in items:
+        var = str(_first(node, "VariableName", "variableName") or "").strip()
+        public_key = str(_first(node, "Id", "id") or "").strip()
+        text = str(_first(node, "QuestionText", "questionText", "Label") or "").strip().lower()
+        qtype = str(_first(node, "Type", "type") or "").lower()
+        if var and var.lower() == variable:
+            return public_key or var
+        if fallback is None and ("household size" in text or var.lower() == variable) and any(t in qtype for t in ["numeric", "integer", "number"]):
+            fallback = public_key or var
+    if fallback:
+        return fallback
+    return None
+
+
+def _iter_questionnaire_interview_ids(questionnaire_id: Optional[str], *, page_size: int = 40) -> Iterable[str]:
+    guid, version = _split_qid(questionnaire_id)
+    if not guid or version is None:
+        return
+    page = 1
+    seen: Set[str] = set()
+    max_pages = max(1, int((_to_int(_cfg("dashboard_max_interviews", 50000), 50000) or 50000) / max(1, page_size)))
+    while True:
+        payload = _hq_json_get(f"questionnaires/{guid}/{version}/interviews", params={"limit": page_size, "offset": page})
+        items, total = _payload_items(payload, item_keys=["Interviews", "interviews", "Items", "items"])
+        if not items:
+            return
+        before = len(seen)
+        for item in items:
+            iid = str(_first(item, "InterviewId", "Id", "id") or "").strip()
+            if iid and iid not in seen:
+                seen.add(iid)
+                yield iid
+        added = len(seen) - before
+        if total is not None and len(seen) >= total:
+            return
+        if added == 0:
+            return
+        if page >= max_pages:
+            LOG.warning("Survey dashboard: questionnaire interview pagination hit max_pages=%s for %s", max_pages, questionnaire_id)
+            return
+        page += 1
+
+
+def _hh_size_from_interview(interview_id: str, variable: str) -> Optional[float]:
+    cache_key = f"api_etl:survey_dashboard:hhsize:interview:{interview_id}"
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+    payload = _hq_json_get(f"interviews/{interview_id}")
+    answers = payload.get("Answers") if isinstance(payload, dict) else None
+    out = None
+    if isinstance(answers, list):
+        for answer in answers:
+            if not isinstance(answer, dict):
+                continue
+            if str(answer.get("VariableName") or "").strip().lower() != variable.lower():
+                continue
+            raw = answer.get("Answer")
+            try:
+                out = float(raw)
+            except (TypeError, ValueError):
+                out = None
+            break
+    cache.set(cache_key, out, _to_int(_cfg("dashboard_question_stats_cache_seconds", 600), 600) or 600)
+    return out
+
+
+def _fetch_household_metric_from_interviews(questionnaire_id: Optional[str], variable: str) -> Dict[str, Any]:
+    total = 0.0
+    count = 0
+    try:
+        for iid in _iter_questionnaire_interview_ids(questionnaire_id):
+            value = _hh_size_from_interview(iid, variable)
+            if value is None:
+                continue
+            total += value
+            count += 1
+    except Exception:
+        LOG.warning("Survey dashboard: interview-answer fallback failed questionnaireId=%s variable=%s", questionnaire_id, variable, exc_info=True)
+        return {"total": None, "average": None, "count": None, "variable": variable}
+    if not count:
+        return {"total": None, "average": None, "count": 0, "variable": variable}
+    return {"total": round(total), "average": round(total / count, 1), "count": count, "variable": variable}
+
+
+def fetch_household_size_metric(questionnaire_id: Optional[str]) -> Dict[str, Any]:
+    guid, version = _split_qid(questionnaire_id)
+    cache_key = _household_metric_cache_key(questionnaire_id)
+    cached = cache.get(cache_key)
+    if isinstance(cached, dict):
+        return cached
+    unsupported_key = f"api_etl:survey_dashboard:hhsize:unsupported:{guid}${version if version is not None else ''}"
+    if cache.get(unsupported_key):
+        return {"total": None, "average": None, "count": None, "variable": str(_cfg("dashboard_household_size_variable", "hh_size") or "hh_size")}
+    variable = str(_cfg("dashboard_household_size_variable", "hh_size") or "hh_size").strip()
+    tokens = []
+    explicit = str(_cfg("dashboard_household_size_question_key", "") or "").strip()
+    if explicit:
+        tokens.append(explicit)
+    if variable:
+        tokens.append(variable)
+    discovered = _find_household_question_token(questionnaire_id)
+    if discovered and discovered not in tokens:
+        tokens.append(discovered)
+
+    rows: List[Dict[str, float]] = []
+    used_token = None
+    for token in tokens:
+        rows = _fetch_household_metric_rows(questionnaire_id, token)
+        if rows:
+            used_token = token
+            break
+    total = None
+    average = None
+    count = None
+    if rows:
+        sum_rows = [r["sum"] for r in rows if "sum" in r]
+        count_rows = [r["count"] for r in rows if "count" in r]
+        avg_rows = [r["average"] for r in rows if "average" in r]
+        if sum_rows:
+            total = round(sum(sum_rows))
+        if count_rows:
+            count = int(round(sum(count_rows)))
+        if total is None and count and avg_rows:
+            total = round(sum(avg_rows) / len(avg_rows) * count)
+        if avg_rows:
+            average = round((total / count), 1) if total is not None and count else round(sum(avg_rows) / len(avg_rows), 1)
+    result = {"total": total, "average": average, "count": count, "variable": used_token or variable}
+    if total is None and average is None and count is None:
+        result = _fetch_household_metric_from_interviews(questionnaire_id, variable)
+    if result.get("total") is None and result.get("average") is None and result.get("count") in (None, 0):
+        cache.set(unsupported_key, True, _to_int(_cfg("dashboard_question_stats_cache_seconds", 600), 600) or 600)
+    cache.set(cache_key, result, _to_int(_cfg("dashboard_question_stats_cache_seconds", 600), 600) or 600)
+    return result
+
+
+def _fetch_supervisor_team_rows(supervisor_id: str) -> List[Dict[str, Any]]:
+    routes = [
+        (f"supervisors/{supervisor_id}/interviewers", None),
+        ("interviewers", {"supervisorId": supervisor_id}),
+        ("interviewers", {"supervisor_id": supervisor_id}),
+        ("interviewers", {"supervisor": supervisor_id}),
+    ]
+    for idx, (route, params) in enumerate(routes):
+        try:
+            rows = _hq_paged_items(route, params=params, item_keys=["Interviewers", "interviewers", "Items", "items", "Users", "users"])
+            if rows or idx == 0:
+                return rows
+        except HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else None
+            if status == 404:
+                LOG.debug("Survey dashboard: supervisor team endpoint unsupported route=%s", route)
+                if idx == 0:
+                    continue
+                continue
+            LOG.warning("Survey dashboard: supervisor team request failed route=%s status=%s", route, status, exc_info=True)
+        except Exception:
+            LOG.warning("Survey dashboard: supervisor team request failed route=%s", route, exc_info=True)
+    return []
+
+
+def fetch_supervisor_roster() -> Dict[str, Any]:
+    cache_key = "api_etl:survey_dashboard:supervisor_roster"
+    cached = cache.get(cache_key)
+    if isinstance(cached, dict):
+        return cached
+
+    supervisors: List[Dict[str, Any]] = []
+    interviewer_map: Dict[str, str] = {}
+    supervisor_aliases: Dict[str, Dict[str, Any]] = {}
+    try:
+        rows = _hq_paged_items("supervisors", item_keys=["Supervisors", "supervisors", "Items", "items", "Users", "users"])
+    except Exception:
+        LOG.debug("Survey dashboard: could not fetch supervisor roster", exc_info=True)
+        rows = []
+
+    for row in rows:
+        supervisor_id = str(_first(row, "SupervisorId", "UserId", "Id", "id") or "").strip()
+        username = str(_first(row, "UserName", "Username", "Login") or "").strip()
+        display_name = str(_first(row, "FullName", "Name", "Title", "UserName", "Username") or username or supervisor_id).strip()
+        if not display_name:
+            continue
+        team_rows = _fetch_supervisor_team_rows(supervisor_id) if supervisor_id else []
+        team_aliases: Set[str] = set()
+        for iv in team_rows:
+            for alias in [
+                _first(iv, "FullName", "Name", "ResponsibleName"),
+                _first(iv, "UserName", "Username", "Login"),
+            ]:
+                norm = _normalize_name(alias)
+                if norm:
+                    interviewer_map[norm] = display_name
+                    team_aliases.add(norm)
+        supervisor = {
+            "id": supervisor_id or display_name,
+            "name": display_name,
+            "username": username or display_name,
+            "teamSize": len(team_aliases),
+        }
+        supervisors.append(supervisor)
+        for alias in [display_name, username]:
+            norm = _normalize_name(alias)
+            if norm:
+                supervisor_aliases[norm] = supervisor
+
+    result = {
+        "supervisors": sorted(supervisors, key=lambda x: (x.get("name") or "").lower()),
+        "interviewerMap": interviewer_map,
+        "supervisorAliases": supervisor_aliases,
+    }
+    cache.set(cache_key, result, _to_int(_cfg("dashboard_roster_cache_seconds", 600), 600) or 600)
+    return result
 
 
 def iter_sample_briefs(
@@ -486,6 +878,8 @@ def poll_interviews(
     seen = changed = created_rows = 0
     if with_sample:
         cap = sample_size if sample_size is not None else _to_int(_cfg("dashboard_sample_size", 600), 600)
+        roster = fetch_supervisor_roster()
+        interviewer_map = roster.get("interviewerMap", {}) if isinstance(roster, dict) else {}
         # Collect + de-duplicate by interview id (HQ pages can overlap / repeat).
         briefs_by_id: Dict[str, Dict[str, Any]] = {}
         for b in iter_sample_briefs(questionnaire_id, max_interviews=int(cap or 0)):
@@ -503,6 +897,10 @@ def poll_interviews(
             to_create: List[SurveyInterviewCache] = []
             for iid, brief in briefs:
                 fields = _brief_to_fields(brief, q_titles)
+                if not fields.get("supervisor_name") and fields.get("responsible_name"):
+                    derived = interviewer_map.get(_normalize_name(fields.get("responsible_name")))
+                    if derived:
+                        fields["supervisor_name"] = derived
                 jext = _brief_json_ext(brief)
                 seen += 1
                 row = existing.get(iid)
@@ -553,6 +951,27 @@ def _qs(questionnaire_id: Optional[str]):
         if version is not None:
             qs = qs.filter(questionnaire_version=version)
     return qs
+
+
+def _activity_order(qs):
+    return qs.annotate(
+        activity_at=Coalesce(
+            "last_entry_at_utc",
+            "server_updated_at_utc",
+            "updated_at",
+            "status_changed_at",
+            "first_seen_at",
+        )
+    ).order_by("-activity_at", "-updated_at", "-status_changed_at")
+
+
+def _row_activity_at(row: Dict[str, Any]):
+    return (
+        row.get("last_entry_at_utc")
+        or row.get("server_updated_at_utc")
+        or row.get("updated_at")
+        or row.get("status_changed_at")
+    )
 
 
 def last_polled_at():
@@ -706,14 +1125,25 @@ def compute_metrics(questionnaire_id: Optional[str] = None, *, days: int = 30) -
     rejected_total = rejected_sup + rejected_hq
     rejection_rate = round((rejected_total / completed_or_beyond) * 100.0, 1) if completed_or_beyond else 0.0
     target_total = _to_int(_cfg("dashboard_target_total", 0), 0) or total
+    roster = fetch_supervisor_roster()
+    interviewer_map = roster.get("interviewerMap", {}) if isinstance(roster, dict) else {}
+    supervisor_aliases = roster.get("supervisorAliases", {}) if isinstance(roster, dict) else {}
+    household_metric = _load_household_metric(questionnaire_id)
 
     # --- sample rows (bounded) for feed-derived stats: leaderboard / heatmap / active / duration ---
     sample_rows = list(
-        _qs(questionnaire_id)
-        .order_by("-status_changed_at", "-updated_at")
-        .values("status", "responsible_name", "supervisor_name", "last_entry_at_utc", "duration_minutes")[:row_cap]
+        _activity_order(_qs(questionnaire_id))
+        .values(
+            "status", "responsible_name", "supervisor_name", "last_entry_at_utc",
+            "server_updated_at_utc", "status_changed_at", "updated_at", "duration_minutes",
+        )[:row_cap]
     )
     sample_size = _qs(questionnaire_id).count()
+
+    leaderboard_rows = [
+        r for r in sample_rows
+        if (_row_activity_at(r) is not None and (now - _row_activity_at(r)) <= active_window)
+    ] or sample_rows
 
     durations: List[float] = []
     active_enums = set()
@@ -721,16 +1151,31 @@ def compute_metrics(questionnaire_id: Optional[str] = None, *, days: int = 30) -
         lambda: {"completed": 0, "approvedBySupervisor": 0, "approvedByHq": 0, "rejected": 0, "total": 0,
                  "supervisorName": None, "lastActivity": None}
     )
+    supervisor_stats: Dict[str, Dict[str, Any]] = defaultdict(
+        lambda: {"pendingReview": 0, "reviewed": 0, "rejected": 0, "total": 0, "lastActivity": None,
+                 "username": None, "teamSize": 0, "activeInterviewers": set()}
+    )
+    for sup in (roster.get("supervisors", []) if isinstance(roster, dict) else []):
+        ss = supervisor_stats[sup["name"]]
+        ss["username"] = sup.get("username")
+        ss["teamSize"] = sup.get("teamSize", 0)
+
     heat: Dict[tuple, int] = defaultdict(int)
-    for r in sample_rows:
+    for r in leaderboard_rows:
         st = r["status"] or ""
         name = (r["responsible_name"] or "").strip() or "(unassigned)"
+        supervisor_name = (r["supervisor_name"] or "").strip()
+        if not supervisor_name and name and name != "(unassigned)":
+            supervisor_name = interviewer_map.get(_normalize_name(name), "")
+        sup_meta = supervisor_aliases.get(_normalize_name(supervisor_name)) if supervisor_name else None
+        if sup_meta:
+            supervisor_name = sup_meta.get("name") or supervisor_name
         es = enum_stats[name]
         es["total"] += 1
-        es["supervisorName"] = es["supervisorName"] or r["supervisor_name"]
-        le = r["last_entry_at_utc"]
-        if le and (es["lastActivity"] is None or le > es["lastActivity"]):
-            es["lastActivity"] = le
+        es["supervisorName"] = es["supervisorName"] or supervisor_name or None
+        act = _row_activity_at(r)
+        if act and (es["lastActivity"] is None or act > es["lastActivity"]):
+            es["lastActivity"] = act
         if st in COMPLETED_OR_BEYOND:
             es["completed"] += 1
         if st in APPROVED_SUP_OR_BEYOND:
@@ -739,10 +1184,29 @@ def compute_metrics(questionnaire_id: Optional[str] = None, *, days: int = 30) -
             es["approvedByHq"] += 1
         if st in REJECTED_STATUSES:
             es["rejected"] += 1
+        if supervisor_name:
+            ss = supervisor_stats[supervisor_name]
+            if sup_meta:
+                ss["username"] = ss.get("username") or sup_meta.get("username")
+                ss["teamSize"] = max(ss.get("teamSize", 0), sup_meta.get("teamSize", 0))
+            ss["total"] += 1
+            if st == S_COMPLETED:
+                ss["pendingReview"] += 1
+            if st in APPROVED_SUP_OR_BEYOND or st == S_REJECTED_BY_SUPERVISOR:
+                ss["reviewed"] += 1
+            if st == S_REJECTED_BY_SUPERVISOR:
+                ss["rejected"] += 1
+            if act and (ss["lastActivity"] is None or act > ss["lastActivity"]):
+                ss["lastActivity"] = act
+            if act and (now - act) <= active_window and name and name != "(unassigned)":
+                ss["activeInterviewers"].add(name)
         if r["duration_minutes"] is not None and st in COMPLETED_OR_BEYOND:
             durations.append(r["duration_minutes"])
-        if le and (now - le) <= active_window and r["responsible_name"]:
+        if act and (now - act) <= active_window and r["responsible_name"]:
             active_enums.add(name)
+
+    for r in sample_rows:
+        le = r["last_entry_at_utc"]
         if le:
             lo = _local(le)
             heat[(lo.weekday(), lo.hour)] += 1
@@ -792,8 +1256,24 @@ def compute_metrics(questionnaire_id: Optional[str] = None, *, days: int = 30) -
             "total": es["total"],
             "lastActivity": es["lastActivity"].isoformat() if es["lastActivity"] else None,
         })
-    leaderboard.sort(key=lambda x: (x["completed"], x["approvedByHq"], x["total"]), reverse=True)
+    leaderboard.sort(key=lambda x: (x["completed"], x["approvedByHq"], x["lastActivity"] or "", x["total"]), reverse=True)
     leaderboard = leaderboard[:25]
+
+    supervisor_leaderboard = []
+    for name, ss in supervisor_stats.items():
+        supervisor_leaderboard.append({
+            "name": name,
+            "username": ss.get("username"),
+            "pendingReview": ss["pendingReview"],
+            "reviewed": ss["reviewed"],
+            "rejected": ss["rejected"],
+            "total": ss["total"],
+            "teamSize": ss.get("teamSize", 0),
+            "activeInterviewers": len(ss.get("activeInterviewers", set())),
+            "lastActivity": ss["lastActivity"].isoformat() if ss["lastActivity"] else None,
+        })
+    supervisor_leaderboard.sort(key=lambda x: (x["reviewed"], x["pendingReview"], x["activeInterviewers"], x["lastActivity"] or "", x["teamSize"], x["total"]), reverse=True)
+    supervisor_leaderboard = supervisor_leaderboard[:20]
 
     # --- heatmap (7 x 24, over the sample) ---
     heatmap = [{"dayOfWeek": dow, "hour": h, "count": heat.get((dow, h), 0)} for dow in range(7) for h in range(24)]
@@ -819,6 +1299,10 @@ def compute_metrics(questionnaire_id: Optional[str] = None, *, days: int = 30) -
         "hqBacklog": approved_sup + sent_to_capital,
         "pendingReviewBacklog": completed + approved_sup + sent_to_capital,
         "avgInterviewDurationMinutes": avg_duration,
+        "householdMembersTotal": household_metric.get("total"),
+        "householdSizeAverage": household_metric.get("average"),
+        "householdSizeInterviews": household_metric.get("count"),
+        "householdSizeVariable": household_metric.get("variable"),
         "activeEnumerators": len(active_enums),
         "targetTotal": target_total,
         "sampleSize": sample_size,
@@ -829,6 +1313,7 @@ def compute_metrics(questionnaire_id: Optional[str] = None, *, days: int = 30) -
         "completionSeries": completion_series,
         "approvalFunnel": approval_funnel,
         "enumeratorLeaderboard": leaderboard,
+        "supervisorLeaderboard": supervisor_leaderboard,
         "activityHeatmap": heatmap,
     }
 
@@ -838,6 +1323,7 @@ def list_interviews(
     questionnaire_id: Optional[str] = None,
     status: Optional[str] = None,
     responsible_name: Optional[str] = None,
+    supervisor_name: Optional[str] = None,
     search: Optional[str] = None,
     from_date: Optional[Any] = None,
     limit: int = 50,
@@ -848,6 +1334,8 @@ def list_interviews(
         qs = qs.filter(status=status)
     if responsible_name:
         qs = qs.filter(responsible_name__icontains=responsible_name)
+    if supervisor_name:
+        qs = qs.filter(supervisor_name__icontains=supervisor_name)
     if search:
         qs = qs.filter(
             Q(interview_key__icontains=search)
@@ -861,7 +1349,7 @@ def list_interviews(
             # when we first observed its status if HQ didn't give a last-entry time.
             qs = qs.filter(Q(last_entry_at_utc__gte=d) | (Q(last_entry_at_utc__isnull=True) & Q(status_changed_at__gte=d)))
     limit = max(1, min(_to_int(limit, 50) or 50, 500))
-    return list(qs.order_by("-status_changed_at", "-updated_at")[:limit])
+    return list(_activity_order(qs)[:limit])
 
 
 # --------------------------------------------------------------------------- #
@@ -906,6 +1394,12 @@ def take_daily_snapshot(questionnaire_id: Optional[str] = None, status_counts: O
 
 def refresh_dashboard(questionnaire_id: Optional[str] = None, *, with_sample: bool = True) -> Dict[str, Any]:
     result = poll_interviews(questionnaire_id=questionnaire_id, with_sample=with_sample)
+    if with_sample:
+        try:
+            if questionnaire_id:
+                fetch_household_size_metric(questionnaire_id)
+        except Exception:
+            LOG.warning("Survey dashboard: household metric refresh failed during sync", exc_info=True)
     try:
         if result.get("total_count"):  # don't write an all-zero snapshot when HQ was unreachable
             take_daily_snapshot(questionnaire_id=questionnaire_id, status_counts=result.get("status_counts"))
@@ -982,7 +1476,7 @@ def maybe_async_refresh(questionnaire_id: Optional[str] = None) -> bool:
     try:
         from api_etl.tasks import poll_survey_dashboard_task
 
-        poll_survey_dashboard_task.delay(questionnaire_id)
+        poll_survey_dashboard_task.delay(questionnaire_id, False)
         return True
     except Exception:
         LOG.info("Survey dashboard: no Celery broker — running self-heal poll in a background thread")

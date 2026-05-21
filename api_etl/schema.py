@@ -67,6 +67,7 @@ class Query(graphene.ObjectType):
         questionnaire_id=graphene.String(),
         status=graphene.String(),
         responsible_name=graphene.String(),
+        supervisor_name=graphene.String(),
         search=graphene.String(),
         from_date=graphene.String(description="Only interviews with activity on/after this date (YYYY-MM-DD)"),
         first=graphene.Int(),

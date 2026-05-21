@@ -217,6 +217,12 @@ DEFAULT_CONFIG = {
     "dashboard_sample_size": 350,
     # Cap on cached rows scanned in Python when building the leaderboard/heatmap.
     "dashboard_metrics_row_cap": 5000,
+    # Optional questionnaire question identifier/variable for a numeric household-size metric.
+    "dashboard_household_size_question_key": "",
+    "dashboard_household_size_variable": "hh_size",
+    # Cache TTLs for optional HQ enrichments.
+    "dashboard_roster_cache_seconds": 600,
+    "dashboard_question_stats_cache_seconds": 600,
     # HQ HTTP timeouts (seconds): short connect so an unreachable HQ fails fast.
     "dashboard_hq_connect_timeout": 5,
     "dashboard_hq_read_timeout": 60,

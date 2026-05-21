@@ -559,6 +559,18 @@ class SurveyInterviewGQLType(graphene.ObjectType):
     duration_minutes = graphene.Float()
 
 
+class SurveySupervisorStatGQLType(graphene.ObjectType):
+    name = graphene.String()
+    username = graphene.String()
+    pending_review = graphene.Int()
+    reviewed = graphene.Int()
+    rejected = graphene.Int()
+    total = graphene.Int()
+    team_size = graphene.Int()
+    active_interviewers = graphene.Int()
+    last_activity = graphene.String()
+
+
 class SurveyDashboardMetricsGQLType(graphene.ObjectType):
     total_interviews = graphene.Int()
     in_progress = graphene.Int()
@@ -573,6 +585,10 @@ class SurveyDashboardMetricsGQLType(graphene.ObjectType):
     hq_backlog = graphene.Int()
     pending_review_backlog = graphene.Int()
     avg_interview_duration_minutes = graphene.Float()
+    household_members_total = graphene.Int()
+    household_size_average = graphene.Float()
+    household_size_interviews = graphene.Int()
+    household_size_variable = graphene.String()
     active_enumerators = graphene.Int()
     target_total = graphene.Int()
     sample_size = graphene.Int()
@@ -583,6 +599,7 @@ class SurveyDashboardMetricsGQLType(graphene.ObjectType):
     completion_series = graphene.List(SurveyDailyCountGQLType)
     approval_funnel = graphene.List(SurveyFunnelStageGQLType)
     enumerator_leaderboard = graphene.List(SurveyEnumeratorStatGQLType)
+    supervisor_leaderboard = graphene.List(SurveySupervisorStatGQLType)
     activity_heatmap = graphene.List(SurveyHeatmapCellGQLType)
 
 
@@ -621,6 +638,10 @@ def resolve_survey_dashboard(info, **kwargs):
         hq_backlog=m["hqBacklog"],
         pending_review_backlog=m["pendingReviewBacklog"],
         avg_interview_duration_minutes=m["avgInterviewDurationMinutes"],
+        household_members_total=m.get("householdMembersTotal"),
+        household_size_average=m.get("householdSizeAverage"),
+        household_size_interviews=m.get("householdSizeInterviews"),
+        household_size_variable=m.get("householdSizeVariable"),
         active_enumerators=m["activeEnumerators"],
         target_total=m["targetTotal"],
         sample_size=m.get("sampleSize", 0),
@@ -649,6 +670,20 @@ def resolve_survey_dashboard(info, **kwargs):
             )
             for d in m["enumeratorLeaderboard"]
         ],
+        supervisor_leaderboard=[
+            SurveySupervisorStatGQLType(
+                name=d["name"],
+                username=d.get("username"),
+                pending_review=d["pendingReview"],
+                reviewed=d["reviewed"],
+                rejected=d["rejected"],
+                total=d["total"],
+                team_size=d.get("teamSize"),
+                active_interviewers=d.get("activeInterviewers"),
+                last_activity=d["lastActivity"],
+            )
+            for d in m.get("supervisorLeaderboard", [])
+        ],
         activity_heatmap=[
             SurveyHeatmapCellGQLType(day_of_week=d["dayOfWeek"], hour=d["hour"], count=d["count"])
             for d in m["activityHeatmap"]
@@ -662,6 +697,7 @@ def resolve_survey_interviews(info, **kwargs):
     questionnaire_id = kwargs.get("questionnaire_id") or kwargs.get("questionnaireId")
     status = kwargs.get("status")
     responsible_name = kwargs.get("responsible_name") or kwargs.get("responsibleName")
+    supervisor_name = kwargs.get("supervisor_name") or kwargs.get("supervisorName")
     search = kwargs.get("search")
     from_date = kwargs.get("from_date") or kwargs.get("fromDate")
     limit = kwargs.get("limit") or kwargs.get("first") or 50
@@ -670,6 +706,7 @@ def resolve_survey_interviews(info, **kwargs):
         questionnaire_id=questionnaire_id,
         status=status,
         responsible_name=responsible_name,
+        supervisor_name=supervisor_name,
         search=search,
         from_date=from_date,
         limit=limit,
