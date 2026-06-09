@@ -128,6 +128,37 @@ class SurveySolutionsTargetingAdapterTest(TestCase):
                 )
                 self.assertEqual(result["individual_role"], "OTHER RELATIVE")
 
+    def test_numeric_sex_codes_resolve_gender_and_gendered_roles(self):
+        """
+        Survey Solutions sends sex as numeric codes ("1"=M, "2"=F). The adapter
+        must apply adapter_gender_map BEFORE role mapping, otherwise gendered
+        roles collapse to OTHER RELATIVE and json_ext.gender is empty.
+        Default map ({"1": "M", "2": "F"}) applies even with empty config.
+        """
+        cases = [
+            ({"RELATIONSHIPTOHEAD": "3", "SEX": "1"}, "M", "SON"),
+            ({"RELATIONSHIPTOHEAD": "3", "SEX": "2"}, "F", "DAUGHTER"),
+            ({"RELATIONSHIPTOHEAD": "5", "SEX": "1"}, "M", "BROTHER"),
+            ({"RELATIONSHIPTOHEAD": "6", "SEX": "2"}, "F", "GRANDDAUGHTER"),
+            ({"RELATIONSHIPTOHEAD": "7", "SEX": "1"}, "M", "FATHER"),
+        ]
+        for overrides, expected_gender, expected_role in cases:
+            with self.subTest(overrides=overrides):
+                result = self.adapter.transform(self._build_record(overrides=overrides))
+                self.assertEqual(result["individual_role"], expected_role)
+                self.assertEqual(result["json_ext"].get("gender"), expected_gender)
+
+    def test_adapter_gender_map_config_override(self):
+        """A custom adapter_gender_map from ModuleConfiguration is honored."""
+        adapter = SurveySolutionsTargetingAdapter(
+            config={"adapter_gender_map": {"male": "M", "female": "F"}}
+        )
+        result = adapter.transform(
+            self._build_record(overrides={"RELATIONSHIPTOHEAD": "3", "SEX": "female"})
+        )
+        self.assertEqual(result["json_ext"].get("gender"), "F")
+        self.assertEqual(result["individual_role"], "DAUGHTER")
+
     def test_role_mapping_returns_none_when_relationship_code_missing(self):
         result = self.adapter.transform(
             self._build_record(overrides={"RELATIONSHIPTOHEAD": None}),

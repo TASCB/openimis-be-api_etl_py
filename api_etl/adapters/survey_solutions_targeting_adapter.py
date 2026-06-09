@@ -48,6 +48,29 @@ class SurveySolutionsTargetingAdapter(DataAdapter):
             return digits.zfill(2)
         return "01"
 
+    def _normalize_gender(self, raw: Any) -> Optional[str]:
+        """
+        Resolve a source sex/gender value to canonical "M"/"F".
+
+        Survey Solutions sends sex as a numeric code ("1"/"2"), so we apply the
+        configurable adapter_gender_map (default {"1": "M", "2": "F"}) BEFORE the
+        M/F check. Without this, numeric codes are discarded and every
+        gender-dependent household role (SON/DAUGHTER, BROTHER/SISTER, etc.)
+        collapses to "OTHER RELATIVE", and json_ext.gender is never stored.
+        Full words ("MALE"/"FEMALE") are tolerated as a fallback.
+        """
+        s = str(raw or "").strip()
+        if not s:
+            return None
+        gmap = self.config.get("adapter_gender_map") or {"1": "M", "2": "F"}
+        mapped = gmap.get(s, gmap.get(s.upper(), s))
+        mapped = str(mapped or "").strip().upper()
+        if mapped == "MALE":
+            mapped = "M"
+        elif mapped == "FEMALE":
+            mapped = "F"
+        return mapped if mapped in ("M", "F") else None
+
     def _map_role(self, rth: Optional[str], gender: Optional[str]) -> Optional[str]:
         c = str(rth or "").strip()
         g = str(gender or "").strip().upper()
@@ -110,9 +133,9 @@ class SurveySolutionsTargetingAdapter(DataAdapter):
         # --- DOB / Gender ---
         dob_norm = to_date_str(self._get(record, "dob", "DATEOFBIRTH"))
         g_raw = self._get(record, "sex", "gender", "SEX")
-        gender_norm = str(g_raw or "").strip().upper()
-        if gender_norm not in ("M", "F"):
-            gender_norm = None
+        # Apply adapter_gender_map (e.g. SS sex codes "1"->"M", "2"->"F") so that
+        # gender is available to _map_role below; see _normalize_gender.
+        gender_norm = self._normalize_gender(g_raw)
 
         # --- Location Code ---
         vc = self._digits(self._get(record, "village_code", "VILLAGE_CODE"))
