@@ -22,7 +22,15 @@ LOG = logging.getLogger(__name__)
 # field sniffer. gender is here too: it only becomes a CSV column via the
 # explicit PROMOTED_JSON_EXT_FIELDS path below, i.e. only when an adapter put a
 # normalized value under json_ext["gender"] (the SS targeting adapter does).
-CSV_FIELD_DENYLIST = {"raw", "_source", "phone", "email", "gender"}
+# pmt_cutoff_used is PMT metadata that the PMT workflow emits top-level (mirroring
+# pmt_score/pmt_class) but, unlike those, it is not a recognized BenefitPlan column,
+# so the individual import workflow rejects it ("invalid columns: {'pmt_cutoff_used'}").
+# It still persists in Individual.json_ext via the json_ext column.
+# "ID" is denylisted from sniffing because the SOURCE data can carry an "ID" field:
+# the upload (new individuals) workflow rejects "ID", while the update workflow
+# REQUIRES it. So "ID" is never auto-included; the update path opts it back in
+# explicitly via _effective_csv_fields(..., include_id=True).
+CSV_FIELD_DENYLIST = {"raw", "_source", "phone", "email", "gender", "pmt_cutoff_used", "ID"}
 
 # These are stored inside the adapter json_ext payload, but the individual
 # import workflow also needs them as normal CSV columns so they land flat in
@@ -257,7 +265,7 @@ class IndividualImportSink(DataSink):
                 LOG.warning("WorkflowService could not resolve '%s'; falling back to Python resolver", cfg)
         return _resolve_workflow_arg(self.user, cfg)
 
-    def _effective_csv_fields(self, objs: List[Dict[str, Any]]) -> List[str]:
+    def _effective_csv_fields(self, objs: List[Dict[str, Any]], include_id: bool = False) -> List[str]:
         if self.csv_fields:
             fields = [f for f in self.csv_fields if f]
         else:
@@ -270,7 +278,7 @@ class IndividualImportSink(DataSink):
         # Ensure lowercase json_ext ONLY
         fields = [("json_ext" if f == "Json_ext" else f) for f in fields]
 
-        # Remove unwanted columns
+        # Remove unwanted columns (incl. "ID" — re-added below only on the update path)
         fields = [f for f in fields if f not in CSV_FIELD_DENYLIST]
 
         # Always include json_ext column (this is where raw lives)
@@ -284,6 +292,11 @@ class IndividualImportSink(DataSink):
             ):
                 fields.append(field)
 
+        # The update workflow needs the "ID" column to match the existing Individual;
+        # the upload workflow rejects it. Only the update path passes include_id=True.
+        if include_id and "ID" not in fields:
+            fields.append("ID")
+
         # Keep json_ext at end
         fields = [f for f in fields if f != "json_ext"] + ["json_ext"]
         return fields
@@ -296,11 +309,11 @@ class IndividualImportSink(DataSink):
             return "group_code"
         return group_col
 
-    def _to_csv_file(self, objs: List[Dict[str, Any]], filename_hint: str = "individuals"):
+    def _to_csv_file(self, objs: List[Dict[str, Any]], filename_hint: str = "individuals", include_id: bool = False):
         if not objs:
             raise ValueError("No objects to convert to CSV")
 
-        fields = self._effective_csv_fields(objs)
+        fields = self._effective_csv_fields(objs, include_id=include_id)
         LOG.info("IndividualImportSink CSV header: %s", fields)
 
         def value_for_field(row: Dict[str, Any], field: str) -> Any:
@@ -390,9 +403,9 @@ class IndividualImportSink(DataSink):
 
         # EXISTING RECORDS
         if existing_records and self.update_existing:
-            upd_fields = self._effective_csv_fields(existing_records)
+            upd_fields = self._effective_csv_fields(existing_records, include_id=True)
             upd_group_col = self._choose_group_col(upd_fields)
-            update_file = self._to_csv_file(existing_records, filename_hint=f"{bid or 'bulk'}_update")
+            update_file = self._to_csv_file(existing_records, filename_hint=f"{bid or 'bulk'}_update", include_id=True)
             update_wf = self._resolve_workflow(self.update_workflow_cfg)
             self._push_import_file(method, update_file, update_wf, upd_group_col)
             LOG.info("IndividualImportSink updated %s existing record(s).", len(existing_records))
