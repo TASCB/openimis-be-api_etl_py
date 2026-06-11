@@ -197,6 +197,11 @@ DEFAULT_CONFIG = {
     ],
     # Optional: auto-trigger the workflow after upload
     "sink_trigger_workflow_after_upload": False,
+    # Maker-checker for ETL imports. When True the sink stages the data and
+    # creates a tasks_management approval task instead of importing immediately;
+    # the actual insert/update runs only after a checker approves the task in the
+    # Tasks UI. When False (default) the import runs straight through.
+    "sink_enable_maker_checker": False,
     # --- Real-time Survey Monitoring Dashboard ---
     "dashboard_enabled": True,
     # How "fresh" the cache must be before a dashboard query self-heals (seconds).

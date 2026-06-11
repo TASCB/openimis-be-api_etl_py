@@ -153,6 +153,9 @@ class IndividualImportSink(DataSink):
         )
 
         self.trigger_after_upload: bool = bool(self.config.get("sink_trigger_workflow_after_upload", False))
+        # When True, stage the upload and create a tasks_management approval task
+        # instead of importing immediately (see _stage_and_create_task).
+        self.enable_maker_checker: bool = bool(self.config.get("sink_enable_maker_checker", False))
         self._mode, self._method_name, self._method_sig = self._detect_import_method()
 
     def _detect_import_method(self):
@@ -366,6 +369,39 @@ class IndividualImportSink(DataSink):
             raise DataSink.Error(f"Individual import workflow failed: {upload.error}")
         return result or {}
 
+    def _stage_and_create_task(self, import_file, workflow, group_col: str, *, update: bool = False) -> Dict[str, Any]:
+        """
+        Maker-checker path (enabled by config ``sink_enable_maker_checker``).
+
+        Stage the upload and create a ``tasks_management`` approval task WITHOUT
+        running the import workflow. The actual insert/update happens only when a
+        checker approves the task in the Tasks UI, which runs the configured
+        ``validation_*_valid_items_workflow`` (the same SQL procedure that now
+        isolates rows with a missing required field as PARTIAL_SUCCESS instead of
+        failing the whole batch).
+
+        Mirrors ``IndividualImportService.import_individuals`` minus the
+        ``_trigger_workflow`` step.
+        """
+        from individual.services import IndividualTaskCreatorService
+
+        upload = self.svc._save_sources(import_file)
+        self.svc._create_individual_data_upload_records(workflow, upload, group_col)
+
+        creator = IndividualTaskCreatorService(self.user)
+        if update:
+            creator.create_task_with_update_valid_items(str(upload.uuid))
+        else:
+            creator.create_task_with_importing_valid_items(str(upload.uuid))
+
+        LOG.info(
+            "IndividualImportSink: maker-checker ENABLED — created approval task for "
+            "upload %s (update=%s); import is pending checker approval.",
+            upload.uuid,
+            update,
+        )
+        return {"success": True, "data": {"upload_uuid": str(upload.uuid)}, "maker_checker": True}
+
     def push(self, objs: Iterable[Dict[str, Any]], batch_identifier: Optional[str] = None) -> None:
         bid = batch_identifier or self.batch
 
@@ -398,7 +434,10 @@ class IndividualImportSink(DataSink):
             new_group_col = self._choose_group_col(new_fields)
             import_file = self._to_csv_file(new_records, filename_hint=f"{bid or 'bulk'}_new")
             import_wf = self._resolve_workflow(self.import_workflow_cfg)
-            self._push_import_file(method, import_file, import_wf, new_group_col)
+            if self.enable_maker_checker:
+                self._stage_and_create_task(import_file, import_wf, new_group_col, update=False)
+            else:
+                self._push_import_file(method, import_file, import_wf, new_group_col)
             LOG.info("IndividualImportSink pushed %s new record(s).", len(new_records))
 
         # EXISTING RECORDS
@@ -407,5 +446,8 @@ class IndividualImportSink(DataSink):
             upd_group_col = self._choose_group_col(upd_fields)
             update_file = self._to_csv_file(existing_records, filename_hint=f"{bid or 'bulk'}_update", include_id=True)
             update_wf = self._resolve_workflow(self.update_workflow_cfg)
-            self._push_import_file(method, update_file, update_wf, upd_group_col)
+            if self.enable_maker_checker:
+                self._stage_and_create_task(update_file, update_wf, upd_group_col, update=True)
+            else:
+                self._push_import_file(method, update_file, update_wf, upd_group_col)
             LOG.info("IndividualImportSink updated %s existing record(s).", len(existing_records))
