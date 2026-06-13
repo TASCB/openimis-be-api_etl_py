@@ -674,12 +674,42 @@ class SurveySolutionsExportSource(DataSource):
             f"Export job {job_id} timed out after {getattr(C, 'export_timeout_seconds', 900)}s"
         )
 
+    @staticmethod
+    def _prune_old_exports(out_dir: str) -> None:
+        """
+        Best-effort cleanup of kept export ZIPs older than
+        ``export_tmp_retention_hours``. Runs in the worker that owns ``out_dir``
+        (/tmp/ss_exports is per-container, not a shared volume). Never raises.
+        """
+        try:
+            retention_h = float(getattr(C, "export_tmp_retention_hours", 48) or 0)
+        except (TypeError, ValueError):
+            retention_h = 48
+        if retention_h <= 0:
+            return
+        cutoff = time.time() - retention_h * 3600
+        try:
+            with os.scandir(out_dir) as it:
+                for entry in it:
+                    if not entry.name.endswith(".zip"):
+                        continue
+                    try:
+                        if entry.is_file() and entry.stat().st_mtime < cutoff:
+                            os.remove(entry.path)
+                            LOG.info("Pruned old export ZIP: %s", entry.path)
+                    except OSError:
+                        LOG.debug("Prune: could not remove %s", entry.path, exc_info=True)
+        except OSError:
+            LOG.debug("Prune: could not scan %s", out_dir, exc_info=True)
+
     def _download_zip(self, endpoint_base: str, job_id: int, rkwargs: Dict) -> str:
         url = f"{endpoint_base}/export/{job_id}/file"
         ts = get_timestamped_batch_identifier(prefix=f"export_{job_id}_")
         out_dir = getattr(C, "export_tmp_dir", "/tmp/ss_exports") or "/tmp/ss_exports"
         path = os.path.join(out_dir, f"{ts}.zip")
         os.makedirs(os.path.dirname(path), exist_ok=True)
+
+        self._prune_old_exports(out_dir)
 
         r = requests.get(url, stream=True, allow_redirects=True, timeout=300, **rkwargs)
         if r.status_code >= 400:

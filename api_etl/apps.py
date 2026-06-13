@@ -21,6 +21,10 @@ DEFAULT_CONFIG = {
     "export_timeout_seconds": 3600,
     "export_reuse_latest_on_5xx": True,
     "export_keep_zip": False,
+    # Best-effort cleanup of kept export ZIPs in export_tmp_dir: on each download,
+    # remove ZIPs older than this many hours (runs in the worker that owns the
+    # folder; /tmp/ss_exports is per-container, not a shared volume). 0 disables.
+    "export_tmp_retention_hours": 48,
     # --- PAA ETL execution ---
     # When enabled, GraphQL returns immediately and Celery/RabbitMQ runs the import.
     "paa_etl_async_enabled": True,
