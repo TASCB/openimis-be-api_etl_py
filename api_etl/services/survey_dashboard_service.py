@@ -1,26 +1,5 @@
-"""
-Real-time Survey Monitoring Dashboard — backend service.
-
-Survey Solutions does not push status changes, so this module implements the
-"poll & cache" half of a poll/broadcast pattern:
-
-  * ``poll_interviews()``       — pages the HQ ``/api/v1/interviews`` endpoint and
-                                  upserts each interview brief into
-                                  ``SurveyInterviewCache``, recording
-                                  ``status_changed_at`` on every transition.
-  * ``take_daily_snapshot()``   — rolls the cache up into a
-                                  ``SurveyDashboardSnapshot`` row for trend / S-curve charts.
-  * ``compute_metrics()``       — derives the KPIs + visualisation series the
-                                  GraphQL layer / frontend consume.
-  * ``refresh_dashboard()``     — poll + snapshot, used by the Celery task and the
-                                  manual "Refresh" mutation.
-  * ``maybe_async_refresh()``   — cheap staleness guard the GraphQL query calls so
-                                  the dashboard self-heals without Celery beat.
-
-It reuses the HQ connection (base URL / workspace / basic auth) already
-configured for the ETL flow via ``api_etl.apps.ApiEtlConfig`` — nothing here
-touches the existing ETL pipeline.
-"""
+"""Real-time Survey Monitoring Dashboard — poll & cache backend.
+Design notes: docs/SURVEY_DASHBOARD_DEVELOPER_GUIDE.md."""
 
 from __future__ import annotations
 
@@ -42,6 +21,7 @@ from django.utils.dateparse import parse_datetime, parse_date
 
 from api_etl.apps import ApiEtlConfig as C
 from api_etl.models import SurveyInterviewCache, SurveyDashboardSnapshot, PulledHistory
+from api_etl.services import hq_client
 
 LOG = logging.getLogger(__name__)
 
@@ -89,13 +69,6 @@ APPROVED_SUP_OR_BEYOND = {
 
 _LAST_POLL_CACHE_KEY = "api_etl:survey_dashboard:last_poll_at"
 _LAST_FAIL_CACHE_KEY = "api_etl:survey_dashboard:last_fail_at"
-
-
-def _hq_timeout():
-    """(connect, read) timeout for HQ requests — short connect so a dead HQ fails fast."""
-    connect = _to_int(_cfg("dashboard_hq_connect_timeout", 5), 5) or 5
-    read = _to_int(_cfg("dashboard_hq_read_timeout", 60), 60) or 60
-    return (connect, read)
 
 
 # --------------------------------------------------------------------------- #
@@ -199,56 +172,14 @@ def _normalize_name(value: Any) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# HQ client (reuses the ETL connection settings)
+# HQ client (shared with hq_client; reuses the ETL connection settings)
 # --------------------------------------------------------------------------- #
-def _hq_endpoint_base() -> str:
-    # Reuse the helpers from the export source so behaviour stays consistent.
-    from api_etl.sources.survey_solutions_export_source import _compose_endpoint_base
-
-    return _compose_endpoint_base(
-        base_url=_cfg("export_base_url") or _cfg("base_url"),
-        workspace=_cfg("export_workspace") or _cfg("workspace"),
-        api_prefix=_cfg("meta_api_prefix", "/api/v1") or "/api/v1",
-    ).rstrip("/")
-
-
-def hq_web_base() -> str:
-    """
-    The Survey Solutions HQ web base for deep-linking (e.g. an interview review page):
-    ``{export_base_url}/{export_workspace}`` from the api_etl module config. Empty if
-    the base URL isn't configured.
-    """
-    base = (str(_cfg("export_base_url") or _cfg("base_url") or "")).strip().rstrip("/")
-    if not base:
-        return ""
-    ws = (str(_cfg("export_workspace") or _cfg("workspace") or "")).strip().strip("/")
-    return f"{base}/{ws}" if ws else base
-
-
-def _hq_request_kwargs() -> Dict[str, Any]:
-    from api_etl.sources.survey_solutions_export_source import _merge_auth
-
-    return _merge_auth(
-        auth_type=_cfg("auth_type", "basic"),
-        username=_cfg("auth_basic_username"),
-        password=_cfg("auth_basic_password"),
-        bearer=_cfg("auth_bearer_token"),
-    )
-
-
-def _hq_json_get(path: str, *, params: Optional[Dict[str, Any]] = None) -> Any:
-    endpoint_base = _hq_endpoint_base()
-    if not endpoint_base:
-        raise ValueError("Survey Solutions HQ base URL is not configured (export_base_url).")
-    url = f"{endpoint_base}/{path.lstrip('/')}"
-    rkwargs = _hq_request_kwargs()
-    headers = {"Accept": "application/json", "Content-Type": "application/json"}
-    if "headers" in rkwargs:
-        headers.update(rkwargs["headers"])
-    rkwargs = {k: v for k, v in rkwargs.items() if k != "headers"}
-    r = requests.get(url, params=params or None, headers=headers, timeout=_hq_timeout(), **rkwargs)
-    r.raise_for_status()
-    return r.json()
+_hq_timeout = hq_client.timeout
+_hq_endpoint_base = hq_client.endpoint_base
+_hq_request_kwargs = hq_client.request_kwargs
+_hq_json_get = hq_client.json_get
+_graphql_post = hq_client.graphql_post
+hq_web_base = hq_client.web_base
 
 
 def _payload_items(payload: Any, *, item_keys: Optional[List[str]] = None) -> Tuple[List[Dict[str, Any]], Optional[int]]:
@@ -352,12 +283,28 @@ FEED_STATUSES = [
 ]
 
 
+def _graphql_where_base(questionnaire_id: Optional[str]) -> List[str]:
+    guid, version = _split_qid(questionnaire_id)
+    where = []
+    if guid:
+        where.append(f'questionnaireId: {{eq: "{_dashed_guid(guid)}"}}')
+        if version is not None:
+            where.append(f"questionnaireVersion: {{eq: {int(version)}}}")
+    return where
+
+
 def fetch_status_counts(questionnaire_id: Optional[str] = None) -> Dict[str, int]:
-    """
-    One small ``TotalCount`` request per status → ``{status: count}``. This keeps
-    the headline KPIs / approval funnel exact even when the workspace has hundreds
-    of thousands of interviews (we never page through them all).
-    """
+    """Exact per-status counts for the scope: GraphQL filteredCount when available,
+    else one REST TotalCount request per status."""
+    if _cfg("dashboard_graphql_enabled", True):
+        try:
+            counts = hq_client.graphql_status_counts(_graphql_where_base(questionnaire_id), ALL_STATUSES)
+            if counts:
+                LOG.info("Survey dashboard: status counts via GraphQL (qid=%s) = %s", questionnaire_id or "ALL", counts)
+                return counts
+        except Exception:
+            LOG.info("Survey dashboard: GraphQL status counts unavailable — using REST TotalCount", exc_info=True)
+
     grand_total = None
     try:
         grand_total = fetch_total_count(questionnaire_id)  # unfiltered
@@ -396,11 +343,8 @@ def _to_float(v) -> Optional[float]:
 
 
 def _parse_numeric_report(payload: Any) -> Optional[Dict[str, Any]]:
-    """
-    Parse the /statistics numeric report. The JSON body is DataTables-style: ``data``
-    rows are positional arrays whose trailing 9 columns are count, average, median,
-    sum, min, p05, p50, p95, max (leading columns are team/interviewer labels).
-    """
+    """Parse the /statistics numeric report: DataTables rows whose trailing 9
+    columns are count, average, median, sum, min, p05, p50, p95, max."""
     if not isinstance(payload, dict):
         return None
     rows = payload.get("data") or payload.get("Data") or []
@@ -531,12 +475,8 @@ def _find_household_question_token(questionnaire_id: Optional[str]) -> Optional[
 
 
 def fetch_household_size_metric(questionnaire_id: Optional[str]) -> Dict[str, Any]:
-    """
-    Household-size metric for the scope: total = Σ valid numeric answers, count =
-    number of valid answers (the denominator shown in the UI), average = total/count.
-    Source ladder: HQ /statistics report when it works → locally harvested
-    ``SurveyInterviewCache.hh_size`` (kept live by the poll cycle).
-    """
+    """Σ/avg/valid-count of the household-size question: /statistics when the HQ
+    report works, else the locally harvested hh_size column."""
     cache_key = _household_metric_cache_key(questionnaire_id)
     cached = cache.get(cache_key)
     if isinstance(cached, dict):
@@ -607,11 +547,7 @@ def _fetch_interview_hh_size(interview_id: str, variable: str) -> Optional[float
 
 
 def _harvest_hh_sizes(questionnaire_id: Optional[str] = None, *, budget: Optional[int] = None, throttle: float = 0.0) -> int:
-    """
-    Fetch the household-size answer for cached interviews that never had it fetched
-    or changed since it was fetched. Bounded per call; the poll cycle keeps the
-    steady state current and ``backfill_hh_size`` seeds history.
-    """
+    """Fetch hh_size for cached interviews that are new or changed; bounded per call."""
     variable = _household_variable()
     if budget is None:
         budget = _to_int(_cfg("dashboard_hhsize_fetch_budget", 50), 50) or 50
@@ -728,24 +664,9 @@ def fetch_supervisor_roster() -> Dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- #
-# HQ GraphQL: recency-ordered change detection (validated on HQ 22.02.5)
+# HQ GraphQL: recency-ordered change detection
 # --------------------------------------------------------------------------- #
 _STATUS_CANON = {s.upper(): s for s in ALL_STATUSES + [S_DELETED]}
-
-
-def _graphql_post(query: str) -> Dict[str, Any]:
-    base = (str(_cfg("export_base_url") or _cfg("base_url") or "")).strip().rstrip("/")
-    if not base:
-        raise ValueError("Survey Solutions HQ base URL is not configured (export_base_url).")
-    rkwargs = _hq_request_kwargs()
-    headers = {"Accept": "application/json", "Content-Type": "application/json"}
-    headers.update(rkwargs.pop("headers", {}))
-    r = requests.post(f"{base}/graphql", json={"query": query}, headers=headers, timeout=_hq_timeout(), **rkwargs)
-    r.raise_for_status()
-    payload = r.json()
-    if payload.get("errors"):
-        raise RuntimeError(f"HQ GraphQL error: {str(payload['errors'][0].get('message', ''))[:300]}")
-    return payload.get("data") or {}
 
 
 def _graphql_node_to_brief(node: Dict[str, Any]) -> Dict[str, Any]:
@@ -804,11 +725,7 @@ def fetch_recent_briefs(
     since: Optional[str] = None,
     max_interviews: int = 600,
 ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
-    """
-    Interview briefs changed since ``since`` (oldest first) via the HQ GraphQL API —
-    the deprecated REST list has no recency ordering. Returns (briefs, new_cursor).
-    Single-query documents only: aliased batching is broken on HQ 22.02.5.
-    """
+    """Briefs changed since ``since`` (oldest first) via GraphQL → (briefs, new_cursor)."""
     guid, version = _split_qid(questionnaire_id)
     ws = (str(_cfg("export_workspace") or _cfg("workspace") or "")).strip().strip("/")
     where = []
@@ -854,13 +771,7 @@ def iter_sample_briefs(
     *,
     max_interviews: int = 600,
 ) -> Iterable[Dict[str, Any]]:
-    """
-    Yield a bounded sample of interview briefs for the live feed / leaderboard /
-    heatmap: a few pages per "interesting" status plus an unfiltered page. The
-    endpoint offers no recency sort, so the on-disk cache accumulates the picture
-    across polls; the GraphQL recent-activity slice (see ``fetch_recent_briefs``)
-    is the primary, properly-ordered source when the server supports it.
-    """
+    """REST fallback sample: a few pages per feed status plus an unfiltered page."""
     if max_interviews <= 0:
         return
     page_size = _to_int(_cfg("dashboard_interview_page_size", 200), 200) or 200
@@ -1052,17 +963,10 @@ def poll_interviews(
     with_sample: bool = True,
     sample_size: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """
-    Refresh the dashboard against HQ:
-      1) exact status counts via cheap ``TotalCount`` queries (always),
-      2) optionally the recent-activity slice (GraphQL cursor on ``updateDateUtc``;
-         REST sample pages as fallback) upserted into the local cache,
-      3) a bounded hh_size harvest for new/changed interviews in the slice.
-    """
+    """One poll cycle: status counts + recent-activity slice + bounded hh_size harvest."""
     now = timezone.now()
 
-    # 1) status counts (exact, cheap). Only overwrite the cached counts if HQ
-    # actually answered — keep the last good values when it is unreachable.
+    # only overwrite cached counts when HQ actually answered
     status_counts = fetch_status_counts(questionnaire_id)
     total_count = sum(status_counts.values()) if status_counts else 0
     if status_counts and total_count > 0:
@@ -1574,11 +1478,7 @@ def backfill_hh_size(
     budget: Optional[int] = None,
     throttle: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """
-    Seed the local cache with a questionnaire's interviews and harvest their
-    household-size answers: one bounded, throttled, resumable pass per call.
-    Run via the Celery task or the ``backfill_hh_size`` management command.
-    """
+    """One bounded, throttled, resumable seeding pass for a questionnaire's hh_size."""
     if budget is None:
         budget = _to_int(_cfg("dashboard_hhsize_backfill_budget", 500), 500) or 500
     if throttle is None:
@@ -1623,8 +1523,29 @@ def _maybe_enqueue_backfill(questionnaire_id: Optional[str]) -> None:
         LOG.debug("Survey dashboard: could not enqueue hh_size backfill (no broker?)", exc_info=True)
 
 
+def prune_interview_cache() -> int:
+    """Drop Deleted/stale-in-field rows past retention; Completed+ rows are kept
+    because they store the harvested hh_size answers."""
+    days = _to_int(_cfg("dashboard_cache_retention_days", 90), 90)
+    if not days or days <= 0:
+        return 0
+    cutoff = timezone.now() - timedelta(days=days)
+    deleted, _detail = (
+        SurveyInterviewCache.objects.filter(updated_at__lt=cutoff)
+        .filter(Q(status=S_DELETED) | ~Q(status__in=COMPLETED_OR_BEYOND))
+        .delete()
+    )
+    if deleted:
+        LOG.info("Survey dashboard: pruned %s stale cache row(s)", deleted)
+    return deleted
+
+
 def refresh_dashboard(questionnaire_id: Optional[str] = None, *, with_sample: bool = True) -> Dict[str, Any]:
     result = poll_interviews(questionnaire_id=questionnaire_id, with_sample=with_sample)
+    try:
+        prune_interview_cache()
+    except Exception:
+        LOG.warning("Survey dashboard: cache prune failed", exc_info=True)
     if with_sample:
         targets = [questionnaire_id] if questionnaire_id else [
             q.get("identity") for q in list_dashboard_questionnaires() if q.get("identity")

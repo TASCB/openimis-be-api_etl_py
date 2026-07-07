@@ -229,20 +229,17 @@ DEFAULT_CONFIG = {
     # Optional questionnaire question identifier/variable for a numeric household-size metric.
     "dashboard_household_size_question_key": "",
     "dashboard_household_size_variable": "hh_size",
-    # Household-size harvesting: per-interview answers fetched from
-    # /api/v1/interviews/{id} for new/changed interviews each poll cycle;
-    # backfill_hh_size (Celery task / management command) seeds history.
+    # Household-size harvesting (see docs/SURVEY_DASHBOARD_DEVELOPER_GUIDE.md).
     "dashboard_hhsize_fetch_budget": 50,
     "dashboard_hhsize_backfill_budget": 500,
     "dashboard_hhsize_backfill_throttle": 0.3,
     "dashboard_hhsize_backfill_auto": True,
-    # Recent-activity slice via the HQ GraphQL API (recency-ordered); REST sample
-    # pages are the fallback when disabled or unsupported.
     "dashboard_graphql_enabled": True,
     "dashboard_cursor_lookback_hours": 24,
-    # /statistics failure handling: back off on 5xx, long negative-cache on 404.
     "dashboard_stats_fail_backoff_seconds": 1800,
     "dashboard_stats_unsupported_seconds": 21600,
+    # Days before Deleted / stale in-field rows are pruned (0 disables).
+    "dashboard_cache_retention_days": 90,
     # Cache TTLs for optional HQ enrichments.
     "dashboard_roster_cache_seconds": 600,
     "dashboard_question_stats_cache_seconds": 600,
