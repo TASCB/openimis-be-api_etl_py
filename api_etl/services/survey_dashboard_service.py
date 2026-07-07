@@ -25,6 +25,7 @@ touches the existing ETL pipeline.
 from __future__ import annotations
 
 import logging
+import time
 from collections import defaultdict
 from datetime import timedelta, timezone as dt_timezone, date as date_cls
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
@@ -34,7 +35,7 @@ from requests import HTTPError
 from django.conf import settings
 from django.core.cache import cache
 from django.db import transaction
-from django.db.models import Count
+from django.db.models import Count, F, Q, Sum
 from django.db.models.functions import Coalesce
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime, parse_date
@@ -53,7 +54,8 @@ S_SUPERVISOR_ASSIGNED = "SupervisorAssigned"
 S_INTERVIEWER_ASSIGNED = "InterviewerAssigned"
 S_REJECTED_BY_SUPERVISOR = "RejectedBySupervisor"
 S_READY_FOR_INTERVIEW = "ReadyForInterview"
-S_SENT_TO_CAPITAL = "SentToCapital"
+S_SENT_TO_CAPI = "SentToCapi"
+S_RESTARTED = "Restarted"
 S_COMPLETED = "Completed"
 S_APPROVED_BY_SUPERVISOR = "ApprovedBySupervisor"
 S_REJECTED_BY_HEADQUARTERS = "RejectedByHeadquarters"
@@ -66,19 +68,20 @@ IN_PROGRESS_STATUSES = {
     S_SUPERVISOR_ASSIGNED,
     S_INTERVIEWER_ASSIGNED,
     S_READY_FOR_INTERVIEW,
+    S_RESTARTED,
     S_REJECTED_BY_SUPERVISOR,
 }
 REJECTED_STATUSES = {S_REJECTED_BY_SUPERVISOR, S_REJECTED_BY_HEADQUARTERS}
 # "Completed or beyond" — interview at least reached the supervisor's queue.
 COMPLETED_OR_BEYOND = {
     S_COMPLETED,
-    S_SENT_TO_CAPITAL,
+    S_SENT_TO_CAPI,
     S_APPROVED_BY_SUPERVISOR,
     S_REJECTED_BY_HEADQUARTERS,
     S_APPROVED_BY_HEADQUARTERS,
 }
 APPROVED_SUP_OR_BEYOND = {
-    S_SENT_TO_CAPITAL,
+    S_SENT_TO_CAPI,
     S_APPROVED_BY_SUPERVISOR,
     S_REJECTED_BY_HEADQUARTERS,
     S_APPROVED_BY_HEADQUARTERS,
@@ -103,17 +106,24 @@ def _cfg(name: str, default=None):
 
 
 def _split_qid(questionnaire_id: Optional[str]):
-    """Return (guid, version) from a "GUID$version" identity, version may be None."""
+    """Return (guid, version) from a "GUID$version" identity; guid is dash-less."""
     if not questionnaire_id:
         return None, None
     s = str(questionnaire_id)
     if "$" in s:
         guid, ver = s.rsplit("$", 1)
         try:
-            return guid, int(ver)
+            return guid.replace("-", ""), int(ver)
         except (TypeError, ValueError):
-            return guid, None
-    return s, None
+            return guid.replace("-", ""), None
+    return s.replace("-", ""), None
+
+
+def _dashed_guid(guid) -> str:
+    g = str(guid or "").replace("-", "")
+    if len(g) != 32:
+        return str(guid or "")
+    return f"{g[0:8]}-{g[8:12]}-{g[12:16]}-{g[16:20]}-{g[20:32]}"
 
 
 def _first(d: Dict[str, Any], *names, default=None):
@@ -320,7 +330,8 @@ def _base_params(questionnaire_id: Optional[str]) -> Dict[str, Any]:
 
 def fetch_total_count(questionnaire_id: Optional[str] = None, status: Optional[str] = None) -> Optional[int]:
     """Cheap: ask HQ for one interview and read ``TotalCount`` of the (filtered) set."""
-    params = {"limit": 1, "offset": 1, **_base_params(questionnaire_id)}
+    # /api/v1/interviews paginates with pageSize/page, not limit/offset
+    params = {"pageSize": 1, "page": 1, **_base_params(questionnaire_id)}
     if status:
         params["status"] = status
     _items, total = _interviews_request(params)
@@ -330,9 +341,9 @@ def fetch_total_count(questionnaire_id: Optional[str] = None, status: Optional[s
 # All Survey Solutions interview statuses we count for the dashboard.
 ALL_STATUSES = [
     S_CREATED, S_RESTORED, S_SUPERVISOR_ASSIGNED, S_INTERVIEWER_ASSIGNED,
-    S_READY_FOR_INTERVIEW, S_REJECTED_BY_SUPERVISOR, S_SENT_TO_CAPITAL,
-    S_COMPLETED, S_APPROVED_BY_SUPERVISOR, S_REJECTED_BY_HEADQUARTERS,
-    S_APPROVED_BY_HEADQUARTERS,
+    S_READY_FOR_INTERVIEW, S_REJECTED_BY_SUPERVISOR, S_SENT_TO_CAPI,
+    S_RESTARTED, S_COMPLETED, S_APPROVED_BY_SUPERVISOR,
+    S_REJECTED_BY_HEADQUARTERS, S_APPROVED_BY_HEADQUARTERS,
 ]
 # Statuses the live feed / sample fetch prioritises (the ones managers act on).
 FEED_STATUSES = [
@@ -346,10 +357,6 @@ def fetch_status_counts(questionnaire_id: Optional[str] = None) -> Dict[str, int
     One small ``TotalCount`` request per status → ``{status: count}``. This keeps
     the headline KPIs / approval funnel exact even when the workspace has hundreds
     of thousands of interviews (we never page through them all).
-
-    Observed quirk: HQ's ``/api/v1/interviews?status=SentToCapital`` returns the
-    *whole* set (it's a transient state the filter doesn't honour), so we don't
-    query it — we derive it as ``grand_total - sum(other statuses)``.
     """
     grand_total = None
     try:
@@ -359,8 +366,6 @@ def fetch_status_counts(questionnaire_id: Optional[str] = None) -> Dict[str, int
 
     counts: Dict[str, int] = {}
     for st in ALL_STATUSES:
-        if st == S_SENT_TO_CAPITAL:
-            continue  # derived below
         try:
             n = fetch_total_count(questionnaire_id, status=st)
             if n is not None:
@@ -368,52 +373,61 @@ def fetch_status_counts(questionnaire_id: Optional[str] = None) -> Dict[str, int
         except Exception:
             LOG.warning("Survey dashboard: failed to count status=%s", st, exc_info=True)
 
-    others = sum(counts.values())
-    if grand_total is not None:
-        if others > grand_total:
-            LOG.warning(
-                "Survey dashboard: status counts sum (%s) exceeds grand total (%s) — a status filter may be unreliable; counts=%s",
-                others, grand_total, counts,
-            )
-        counts[S_SENT_TO_CAPITAL] = max(0, grand_total - others)
-    else:
-        counts[S_SENT_TO_CAPITAL] = 0
+    total = sum(counts.values())
+    if grand_total is not None and total != grand_total:
+        LOG.warning(
+            "Survey dashboard: status counts sum (%s) != grand total (%s) — a status filter may be unreliable; counts=%s",
+            total, grand_total, counts,
+        )
     LOG.info(
         "Survey dashboard: status counts (qid=%s) = %s (grandTotal=%s, sum=%s)",
-        questionnaire_id or "ALL", counts, grand_total, sum(counts.values()),
+        questionnaire_id or "ALL", counts, grand_total, total,
     )
     return counts
 
 
-def _direct_metric_row(obj: Dict[str, Any]) -> Dict[str, float]:
-    row: Dict[str, float] = {}
-    for key, value in obj.items():
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            continue
-        lk = str(key).strip().lower().replace("_", "")
-        if lk in {"sum", "total", "totalvalue", "sumvalue"} or lk.endswith("sum"):
-            row["sum"] = float(value)
-        elif lk in {"count", "cases", "interviews", "totalcount", "validcount", "responsescount"} or lk.endswith("count"):
-            row["count"] = float(value)
-        elif lk in {"average", "avg", "mean"} or "average" in lk:
-            row["average"] = float(value)
-    return row
+def _to_float(v) -> Optional[float]:
+    if isinstance(v, bool):
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
 
 
-def _collect_metric_rows(payload: Any) -> List[Dict[str, float]]:
-    rows: List[Dict[str, float]] = []
-    if isinstance(payload, dict):
-        direct = _direct_metric_row(payload)
-        if direct:
-            rows.append(direct)
+def _parse_numeric_report(payload: Any) -> Optional[Dict[str, Any]]:
+    """
+    Parse the /statistics numeric report. The JSON body is DataTables-style: ``data``
+    rows are positional arrays whose trailing 9 columns are count, average, median,
+    sum, min, p05, p50, p95, max (leading columns are team/interviewer labels).
+    """
+    if not isinstance(payload, dict):
+        return None
+    rows = payload.get("data") or payload.get("Data") or []
+    total = 0.0
+    count = 0.0
+    seen = False
+    for r in rows:
+        if isinstance(r, (list, tuple)) and len(r) >= 9:
+            c, s = _to_float(r[-9]), _to_float(r[-6])
+        elif isinstance(r, dict):
+            c, s = _to_float(_first(r, "count", "Count")), _to_float(_first(r, "sum", "Sum"))
         else:
-            for value in payload.values():
-                if isinstance(value, (dict, list)):
-                    rows.extend(_collect_metric_rows(value))
-    elif isinstance(payload, list):
-        for item in payload:
-            rows.extend(_collect_metric_rows(item))
-    return rows
+            continue
+        if c is None or s is None:
+            continue
+        count += c
+        total += s
+        seen = True
+    if not seen:
+        totals = payload.get("totals") or payload.get("Totals")
+        if isinstance(totals, (list, tuple)) and len(totals) >= 9:
+            c, s = _to_float(totals[-9]), _to_float(totals[-6])
+            if c is not None and s is not None:
+                count, total, seen = c, s, True
+    if not seen or count <= 0:
+        return None
+    return {"total": round(total), "average": round(total / count, 1), "count": int(count)}
 
 
 def _stats_qid(guid: Optional[str]) -> Optional[str]:
@@ -429,61 +443,60 @@ def _household_metric_cache_key(questionnaire_id: Optional[str]) -> str:
     return "api_etl:survey_dashboard:hhsize:ALL"
 
 
+def _household_variable() -> str:
+    return str(_cfg("dashboard_household_size_variable", "hh_size") or "hh_size").strip()
+
+
+def _household_metric_from_cache(questionnaire_id: Optional[str]) -> Dict[str, Any]:
+    """Aggregate the locally harvested per-interview household-size answers."""
+    scope = _qs(questionnaire_id).filter(status__in=COMPLETED_OR_BEYOND)
+    agg = scope.filter(hh_size__isnull=False).aggregate(total=Sum("hh_size"), n=Count("id"))
+    count = int(agg["n"] or 0)
+    total = float(agg["total"] or 0)
+    pending = scope.filter(hh_size_fetched_at__isnull=True).count()
+    return {
+        "total": round(total) if count else None,
+        "average": round(total / count, 1) if count else None,
+        "count": count if count else (0 if pending == 0 else None),
+        "variable": _household_variable(),
+        "pending": pending,
+        "source": "live-harvest",
+    }
+
+
 def _load_household_metric(questionnaire_id: Optional[str]) -> Dict[str, Any]:
-    guid, version = _split_qid(questionnaire_id)
-    variable = str(_cfg("dashboard_household_size_variable", "hh_size") or "hh_size")
-    if not guid or version is None:
-        totals = 0
-        counts = 0
-        seen = 0
-        for q in list_dashboard_questionnaires():
-            identity = q.get("identity")
-            if not identity:
-                continue
-            cached = cache.get(_household_metric_cache_key(identity))
-            if not isinstance(cached, dict) or cached.get("total") is None:
-                continue
-            totals += int(cached.get("total") or 0)
-            counts += int(cached.get("count") or 0)
-            seen += 1
-        return {
-            "total": totals if seen else None,
-            "average": round(totals / counts, 1) if counts else None,
-            "count": counts if seen else None,
-            "variable": variable,
-        }
     cached = cache.get(_household_metric_cache_key(questionnaire_id))
     if isinstance(cached, dict):
         return cached
-    return {"total": None, "average": None, "count": None, "variable": variable}
+    return _household_metric_from_cache(questionnaire_id)
 
 
-def _fetch_household_metric_rows(questionnaire_id: Optional[str], token: str) -> List[Dict[str, float]]:
+def _invalidate_household_metric(questionnaire_id: Optional[str] = None) -> None:
+    cache.delete(_household_metric_cache_key(questionnaire_id))
+    if questionnaire_id:
+        cache.delete(_household_metric_cache_key(None))
+
+
+# Status scope used for both the /statistics report and the local aggregate.
+_STATS_SCOPE_STATUSES = [S_COMPLETED, S_APPROVED_BY_SUPERVISOR, S_REJECTED_BY_HEADQUARTERS, S_APPROVED_BY_HEADQUARTERS]
+
+
+def _fetch_statistics_metric(questionnaire_id: Optional[str], token: str) -> Optional[Dict[str, Any]]:
     guid, version = _split_qid(questionnaire_id)
     if not guid:
-        return []
+        return None
     params = {
         "QuestionnaireId": _stats_qid(guid),
         "Question": token,
         "Min": 0,
+        "statuses[]": _STATS_SCOPE_STATUSES,
         "PageSize": 5000,
         "PageIndex": 1,
     }
     if version is not None:
         params["Version"] = version
-    try:
-        payload = _hq_json_get("statistics", params=params)
-        return _collect_metric_rows(payload)
-    except HTTPError as exc:
-        status = exc.response.status_code if exc.response is not None else None
-        if status in (404, 500):
-            LOG.debug("Survey dashboard: statistics endpoint unavailable questionnaireId=%s token=%s status=%s", questionnaire_id, token, status)
-            return []
-        LOG.warning("Survey dashboard: household-size statistics request failed questionnaireId=%s token=%s status=%s", questionnaire_id, token, status, exc_info=True)
-        return []
-    except Exception:
-        LOG.warning("Survey dashboard: household-size statistics request failed questionnaireId=%s token=%s", questionnaire_id, token, exc_info=True)
-        return []
+    payload = _hq_json_get("statistics", params=params)
+    return _parse_numeric_report(payload)
 
 
 def _find_household_question_token(questionnaire_id: Optional[str]) -> Optional[str]:
@@ -517,126 +530,113 @@ def _find_household_question_token(questionnaire_id: Optional[str]) -> Optional[
     return None
 
 
-def _iter_questionnaire_interview_ids(questionnaire_id: Optional[str], *, page_size: int = 40) -> Iterable[str]:
-    guid, version = _split_qid(questionnaire_id)
-    if not guid or version is None:
-        return
-    page = 1
-    seen: Set[str] = set()
-    max_pages = max(1, int((_to_int(_cfg("dashboard_max_interviews", 50000), 50000) or 50000) / max(1, page_size)))
-    while True:
-        payload = _hq_json_get(f"questionnaires/{guid}/{version}/interviews", params={"limit": page_size, "offset": page})
-        items, total = _payload_items(payload, item_keys=["Interviews", "interviews", "Items", "items"])
-        if not items:
-            return
-        before = len(seen)
-        for item in items:
-            iid = str(_first(item, "InterviewId", "Id", "id") or "").strip()
-            if iid and iid not in seen:
-                seen.add(iid)
-                yield iid
-        added = len(seen) - before
-        if total is not None and len(seen) >= total:
-            return
-        if added == 0:
-            return
-        if page >= max_pages:
-            LOG.warning("Survey dashboard: questionnaire interview pagination hit max_pages=%s for %s", max_pages, questionnaire_id)
-            return
-        page += 1
-
-
-def _hh_size_from_interview(interview_id: str, variable: str) -> Optional[float]:
-    cache_key = f"api_etl:survey_dashboard:hhsize:interview:{interview_id}"
-    cached = cache.get(cache_key)
-    if cached is not None:
-        return cached
-    payload = _hq_json_get(f"interviews/{interview_id}")
-    answers = payload.get("Answers") if isinstance(payload, dict) else None
-    out = None
-    if isinstance(answers, list):
-        for answer in answers:
-            if not isinstance(answer, dict):
-                continue
-            if str(answer.get("VariableName") or "").strip().lower() != variable.lower():
-                continue
-            raw = answer.get("Answer")
-            try:
-                out = float(raw)
-            except (TypeError, ValueError):
-                out = None
-            break
-    cache.set(cache_key, out, _to_int(_cfg("dashboard_question_stats_cache_seconds", 600), 600) or 600)
-    return out
-
-
-def _fetch_household_metric_from_interviews(questionnaire_id: Optional[str], variable: str) -> Dict[str, Any]:
-    total = 0.0
-    count = 0
-    try:
-        for iid in _iter_questionnaire_interview_ids(questionnaire_id):
-            value = _hh_size_from_interview(iid, variable)
-            if value is None:
-                continue
-            total += value
-            count += 1
-    except Exception:
-        LOG.warning("Survey dashboard: interview-answer fallback failed questionnaireId=%s variable=%s", questionnaire_id, variable, exc_info=True)
-        return {"total": None, "average": None, "count": None, "variable": variable}
-    if not count:
-        return {"total": None, "average": None, "count": 0, "variable": variable}
-    return {"total": round(total), "average": round(total / count, 1), "count": count, "variable": variable}
-
-
 def fetch_household_size_metric(questionnaire_id: Optional[str]) -> Dict[str, Any]:
-    guid, version = _split_qid(questionnaire_id)
+    """
+    Household-size metric for the scope: total = Σ valid numeric answers, count =
+    number of valid answers (the denominator shown in the UI), average = total/count.
+    Source ladder: HQ /statistics report when it works → locally harvested
+    ``SurveyInterviewCache.hh_size`` (kept live by the poll cycle).
+    """
     cache_key = _household_metric_cache_key(questionnaire_id)
     cached = cache.get(cache_key)
     if isinstance(cached, dict):
         return cached
-    unsupported_key = f"api_etl:survey_dashboard:hhsize:unsupported:{guid}${version if version is not None else ''}"
-    if cache.get(unsupported_key):
-        return {"total": None, "average": None, "count": None, "variable": str(_cfg("dashboard_household_size_variable", "hh_size") or "hh_size")}
-    variable = str(_cfg("dashboard_household_size_variable", "hh_size") or "hh_size").strip()
-    tokens = []
-    explicit = str(_cfg("dashboard_household_size_question_key", "") or "").strip()
-    if explicit:
-        tokens.append(explicit)
-    if variable:
-        tokens.append(variable)
-    discovered = _find_household_question_token(questionnaire_id)
-    if discovered and discovered not in tokens:
-        tokens.append(discovered)
+    guid, version = _split_qid(questionnaire_id)
+    variable = _household_variable()
+    scope = f"{guid}${version if version is not None else ''}"
+    unsupported_key = f"api_etl:survey_dashboard:hhsize:unsupported:{scope}"
+    fail_key = f"api_etl:survey_dashboard:hhsize:failing:{scope}"
 
-    rows: List[Dict[str, float]] = []
-    used_token = None
-    for token in tokens:
-        rows = _fetch_household_metric_rows(questionnaire_id, token)
-        if rows:
-            used_token = token
-            break
-    total = None
-    average = None
-    count = None
-    if rows:
-        sum_rows = [r["sum"] for r in rows if "sum" in r]
-        count_rows = [r["count"] for r in rows if "count" in r]
-        avg_rows = [r["average"] for r in rows if "average" in r]
-        if sum_rows:
-            total = round(sum(sum_rows))
-        if count_rows:
-            count = int(round(sum(count_rows)))
-        if total is None and count and avg_rows:
-            total = round(sum(avg_rows) / len(avg_rows) * count)
-        if avg_rows:
-            average = round((total / count), 1) if total is not None and count else round(sum(avg_rows) / len(avg_rows), 1)
-    result = {"total": total, "average": average, "count": count, "variable": used_token or variable}
-    if total is None and average is None and count is None:
-        result = _fetch_household_metric_from_interviews(questionnaire_id, variable)
-    if result.get("total") is None and result.get("average") is None and result.get("count") in (None, 0):
-        cache.set(unsupported_key, True, _to_int(_cfg("dashboard_question_stats_cache_seconds", 600), 600) or 600)
+    result = None
+    if guid and not cache.get(unsupported_key) and not cache.get(fail_key):
+        tokens = []
+        explicit = str(_cfg("dashboard_household_size_question_key", "") or "").strip()
+        if explicit:
+            tokens.append(explicit)
+        if variable and variable not in tokens:
+            tokens.append(variable)
+        stats_error = False
+        for token in tokens:
+            try:
+                result = _fetch_statistics_metric(questionnaire_id, token)
+            except HTTPError as exc:
+                status = exc.response.status_code if exc.response is not None else None
+                if status == 404:
+                    cache.set(unsupported_key, True, _to_int(_cfg("dashboard_stats_unsupported_seconds", 21600), 21600) or 21600)
+                else:
+                    cache.set(fail_key, True, _to_int(_cfg("dashboard_stats_fail_backoff_seconds", 1800), 1800) or 1800)
+                    LOG.warning("Survey dashboard: /statistics failed (HTTP %s) for %s — using harvested hh_size", status, questionnaire_id)
+                stats_error = True
+                break
+            except Exception:
+                cache.set(fail_key, True, _to_int(_cfg("dashboard_stats_fail_backoff_seconds", 1800), 1800) or 1800)
+                LOG.warning("Survey dashboard: /statistics request failed for %s — using harvested hh_size", questionnaire_id, exc_info=True)
+                stats_error = True
+                break
+            if result:
+                break
+        if result is None and not stats_error:
+            discovered = _find_household_question_token(questionnaire_id)
+            if discovered and discovered not in tokens:
+                try:
+                    result = _fetch_statistics_metric(questionnaire_id, discovered)
+                except Exception:
+                    LOG.debug("Survey dashboard: /statistics failed for discovered token %s", discovered, exc_info=True)
+
+    if result:
+        result = {**result, "variable": variable, "source": "statistics"}
+    else:
+        result = _household_metric_from_cache(questionnaire_id)
     cache.set(cache_key, result, _to_int(_cfg("dashboard_question_stats_cache_seconds", 600), 600) or 600)
     return result
+
+
+def _fetch_interview_hh_size(interview_id: str, variable: str) -> Optional[float]:
+    payload = _hq_json_get(f"interviews/{interview_id}")
+    answers = payload.get("Answers") if isinstance(payload, dict) else None
+    for answer in answers or []:
+        if not isinstance(answer, dict):
+            continue
+        if str(answer.get("VariableName") or "").strip().lower() != variable.lower():
+            continue
+        try:
+            return float(answer.get("Answer"))
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _harvest_hh_sizes(questionnaire_id: Optional[str] = None, *, budget: Optional[int] = None, throttle: float = 0.0) -> int:
+    """
+    Fetch the household-size answer for cached interviews that never had it fetched
+    or changed since it was fetched. Bounded per call; the poll cycle keeps the
+    steady state current and ``backfill_hh_size`` seeds history.
+    """
+    variable = _household_variable()
+    if budget is None:
+        budget = _to_int(_cfg("dashboard_hhsize_fetch_budget", 50), 50) or 50
+    rows = (
+        _qs(questionnaire_id)
+        .filter(status__in=COMPLETED_OR_BEYOND)
+        .filter(Q(hh_size_fetched_at__isnull=True) | Q(server_updated_at_utc__gt=F("hh_size_fetched_at")))
+        .order_by(F("hh_size_fetched_at").asc(nulls_first=True), "-server_updated_at_utc")
+    )
+    done = 0
+    for row in rows[: max(1, budget)]:
+        try:
+            value = _fetch_interview_hh_size(row.interview_id, variable)
+        except Exception:
+            LOG.warning("Survey dashboard: hh_size fetch failed for %s — stopping this sweep", row.interview_id, exc_info=True)
+            break
+        row.hh_size = value
+        row.hh_size_fetched_at = timezone.now()
+        row.save(update_fields=["hh_size", "hh_size_fetched_at", "updated_at"])
+        done += 1
+        if throttle:
+            time.sleep(throttle)
+    if done:
+        _invalidate_household_metric(questionnaire_id)
+    return done
 
 
 def _fetch_supervisor_team_rows(supervisor_id: str) -> List[Dict[str, Any]]:
@@ -664,8 +664,18 @@ def _fetch_supervisor_team_rows(supervisor_id: str) -> List[Dict[str, Any]]:
     return []
 
 
+_ROSTER_CACHE_KEY = "api_etl:survey_dashboard:supervisor_roster"
+_EMPTY_ROSTER = {"supervisors": [], "interviewerMap": {}, "supervisorAliases": {}}
+
+
+def _load_roster() -> Dict[str, Any]:
+    """Roster from cache only — refreshed by the poller, never in the request path."""
+    cached = cache.get(_ROSTER_CACHE_KEY)
+    return cached if isinstance(cached, dict) else dict(_EMPTY_ROSTER)
+
+
 def fetch_supervisor_roster() -> Dict[str, Any]:
-    cache_key = "api_etl:survey_dashboard:supervisor_roster"
+    cache_key = _ROSTER_CACHE_KEY
     cached = cache.get(cache_key)
     if isinstance(cached, dict):
         return cached
@@ -717,41 +727,173 @@ def fetch_supervisor_roster() -> Dict[str, Any]:
     return result
 
 
+# --------------------------------------------------------------------------- #
+# HQ GraphQL: recency-ordered change detection (validated on HQ 22.02.5)
+# --------------------------------------------------------------------------- #
+_STATUS_CANON = {s.upper(): s for s in ALL_STATUSES + [S_DELETED]}
+
+
+def _graphql_post(query: str) -> Dict[str, Any]:
+    base = (str(_cfg("export_base_url") or _cfg("base_url") or "")).strip().rstrip("/")
+    if not base:
+        raise ValueError("Survey Solutions HQ base URL is not configured (export_base_url).")
+    rkwargs = _hq_request_kwargs()
+    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+    headers.update(rkwargs.pop("headers", {}))
+    r = requests.post(f"{base}/graphql", json={"query": query}, headers=headers, timeout=_hq_timeout(), **rkwargs)
+    r.raise_for_status()
+    payload = r.json()
+    if payload.get("errors"):
+        raise RuntimeError(f"HQ GraphQL error: {str(payload['errors'][0].get('message', ''))[:300]}")
+    return payload.get("data") or {}
+
+
+def _graphql_node_to_brief(node: Dict[str, Any]) -> Dict[str, Any]:
+    status = str(node.get("status") or "")
+    role = str(node.get("responsibleRole") or "")
+    return {
+        "InterviewId": str(node.get("id") or "").replace("-", ""),
+        "Key": node.get("key"),
+        "Status": _STATUS_CANON.get(status.upper(), status.title() or None),
+        "ResponsibleId": node.get("responsibleId"),
+        "ResponsibleName": node.get("responsibleName"),
+        "ResponsibleRole": role.title() if role else None,
+        "SupervisorName": node.get("supervisorName"),
+        "ErrorsCount": node.get("errorsCount"),
+        "NotAnsweredCount": node.get("notAnsweredCount"),
+        "AssignmentId": node.get("assignmentId"),
+        "CreatedDate": node.get("createdDate"),
+        "LastEntryDate": node.get("updateDateUtc"),
+        "ServerLastUpdate": node.get("updateDateUtc"),
+        "QuestionnaireId": node.get("questionnaireId"),
+        "QuestionnaireVersion": node.get("questionnaireVersion"),
+    }
+
+
+def _iso_utc(dt) -> Optional[str]:
+    if dt is None:
+        return None
+    return dt.astimezone(dt_timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+
+def _cursor_key(questionnaire_id: Optional[str]) -> str:
+    guid, _v = _split_qid(questionnaire_id)
+    return f"api_etl:survey_dashboard:cursor:{guid or 'ALL'}"
+
+
+def _load_cursor(questionnaire_id: Optional[str]) -> Optional[str]:
+    val = cache.get(_cursor_key(questionnaire_id))
+    if val:
+        return str(val)
+    latest = (
+        _qs(questionnaire_id)
+        .exclude(server_updated_at_utc__isnull=True)
+        .order_by("-server_updated_at_utc")
+        .values_list("server_updated_at_utc", flat=True)
+        .first()
+    )
+    if latest:
+        return _iso_utc(latest - timedelta(minutes=5))  # overlap so restarts miss nothing
+    lookback = _to_int(_cfg("dashboard_cursor_lookback_hours", 24), 24) or 24
+    return _iso_utc(timezone.now() - timedelta(hours=lookback))
+
+
+def fetch_recent_briefs(
+    questionnaire_id: Optional[str] = None,
+    *,
+    since: Optional[str] = None,
+    max_interviews: int = 600,
+) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    """
+    Interview briefs changed since ``since`` (oldest first) via the HQ GraphQL API —
+    the deprecated REST list has no recency ordering. Returns (briefs, new_cursor).
+    Single-query documents only: aliased batching is broken on HQ 22.02.5.
+    """
+    guid, version = _split_qid(questionnaire_id)
+    ws = (str(_cfg("export_workspace") or _cfg("workspace") or "")).strip().strip("/")
+    where = []
+    if guid:
+        where.append(f'questionnaireId: {{eq: "{_dashed_guid(guid)}"}}')
+        if version is not None:
+            where.append(f"questionnaireVersion: {{eq: {int(version)}}}")
+    if since:
+        where.append(f'updateDateUtc: {{gt: "{since}"}}')
+    take = min(100, max(1, max_interviews))
+    briefs: List[Dict[str, Any]] = []
+    cursor = since
+    skip = 0
+    while len(briefs) < max_interviews:
+        parts = ([f'workspace: "{ws}"'] if ws else []) + [
+            f"take: {take}", f"skip: {skip}", "order: {updateDateUtc: ASC}",
+        ]
+        if where:
+            parts.append("where: {" + ", ".join(where) + "}")
+        query = (
+            "{ interviews(" + ", ".join(parts) + ") { nodes { "
+            "id key status responsibleId responsibleName responsibleRole supervisorName "
+            "errorsCount notAnsweredCount assignmentId createdDate updateDateUtc "
+            "questionnaireId questionnaireVersion } } }"
+        )
+        data = _graphql_post(query)
+        nodes = ((data.get("interviews") or {}).get("nodes")) or []
+        if not nodes:
+            break
+        for n in nodes:
+            briefs.append(_graphql_node_to_brief(n))
+            u = n.get("updateDateUtc")
+            if u and (cursor is None or str(u) > str(cursor)):
+                cursor = str(u)
+        if len(nodes) < take:
+            break
+        skip += take
+    return briefs, cursor
+
+
 def iter_sample_briefs(
     questionnaire_id: Optional[str] = None,
     *,
     max_interviews: int = 600,
 ) -> Iterable[Dict[str, Any]]:
     """
-    Yield a small sample of interview briefs for the live feed / leaderboard / heatmap.
-
-    Reality check: this Survey Solutions server's ``GET /api/v1/interviews`` **ignores
-    ``limit`` and ``offset``** — it always returns the same ~10 rows for a given query
-    (``TotalCount`` is still accurate, which is why the headline KPIs are exact). So
-    here we just take one page per "interesting" status plus one unfiltered page,
-    yielding ~50–70 distinct interviews. The on-disk cache accumulates them across
-    polls (the "recent ~10" rotates over time), so the picture gradually fills in.
+    Yield a bounded sample of interview briefs for the live feed / leaderboard /
+    heatmap: a few pages per "interesting" status plus an unfiltered page. The
+    endpoint offers no recency sort, so the on-disk cache accumulates the picture
+    across polls; the GraphQL recent-activity slice (see ``fetch_recent_briefs``)
+    is the primary, properly-ordered source when the server supports it.
     """
     if max_interviews <= 0:
         return
+    page_size = _to_int(_cfg("dashboard_interview_page_size", 200), 200) or 200
     base = _base_params(questionnaire_id)
-    queries: List[Dict[str, Any]] = [dict(base)]  # unfiltered "most recent" page
+    queries: List[Dict[str, Any]] = [dict(base)]  # unfiltered page(s)
     for st in FEED_STATUSES:
         queries.append({**base, "status": st})
+    per_query_budget = max(1, int((max_interviews + len(queries) - 1) / len(queries)))
     yielded = 0
     for q in queries:
-        try:
-            items, _t = _interviews_request({"limit": 200, "offset": 1, **q})
-        except Exception:
-            LOG.warning("Survey dashboard: sample fetch failed for query=%s", q, exc_info=True)
-            continue
-        for it in items:
-            if isinstance(it, dict):
-                yield it
-                yielded += 1
-                if max_interviews and yielded >= max_interviews:
-                    LOG.info("Survey dashboard: sampled %s interview brief(s) for the feed (cap)", yielded)
-                    return
+        taken = 0
+        page = 1
+        while taken < per_query_budget:
+            try:
+                items, _t = _interviews_request({"pageSize": page_size, "page": page, **q})
+            except Exception:
+                LOG.warning("Survey dashboard: sample fetch failed for query=%s page=%s", q, page, exc_info=True)
+                break
+            if not items:
+                break
+            for it in items:
+                if isinstance(it, dict):
+                    yield it
+                    yielded += 1
+                    taken += 1
+                    if max_interviews and yielded >= max_interviews:
+                        LOG.info("Survey dashboard: sampled %s interview brief(s) for the feed (cap)", yielded)
+                        return
+                    if taken >= per_query_budget:
+                        break
+            if len(items) < page_size:
+                break
+            page += 1
     LOG.info("Survey dashboard: sampled %s interview brief(s) for the feed", yielded)
 
 
@@ -801,7 +943,7 @@ def _questionnaire_title_map() -> Dict[str, str]:
             guid = q.get("Id") or q.get("QuestionnaireId")
             title = q.get("Title")
             if guid and title:
-                titles[str(guid)] = title
+                titles[str(guid).replace("-", "")] = title
         return titles
     except Exception:
         LOG.debug("Survey dashboard: could not fetch questionnaire titles", exc_info=True)
@@ -818,10 +960,10 @@ def _brief_to_fields(brief: Dict[str, Any], q_titles: Optional[Dict[str, str]] =
     guid = _first(brief, "QuestionnaireId", "questionnaireId")
     title = _first(brief, "QuestionnaireTitle", "Title")
     if not title and q_titles and guid:
-        title = q_titles.get(str(guid))
+        title = q_titles.get(str(guid).replace("-", ""))
     return {
         "interview_key": _first(brief, "Key", "InterviewKey", "interview__key") or _featured_label(brief),
-        "questionnaire_id": guid,
+        "questionnaire_id": str(guid).replace("-", "") if guid else None,
         "questionnaire_title": title,
         "questionnaire_version": _to_int(_first(brief, "QuestionnaireVersion", "questionnaireVersion"), None),
         "assignment_id": _to_int(_first(brief, "AssignmentId", "assignmentId"), None),
@@ -850,6 +992,60 @@ def _brief_json_ext(brief: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def _upsert_briefs(briefs_iter: Iterable[Dict[str, Any]]) -> Tuple[int, int, int]:
+    """Upsert interview briefs into SurveyInterviewCache → (seen, created, changed)."""
+    now = timezone.now()
+    roster = fetch_supervisor_roster()
+    interviewer_map = roster.get("interviewerMap", {}) if isinstance(roster, dict) else {}
+    briefs_by_id: Dict[str, Dict[str, Any]] = {}
+    for b in briefs_iter:
+        iid = _first(b, "InterviewId", "Id", "interviewId")
+        if iid:
+            briefs_by_id[str(iid).replace("-", "")] = b
+    q_titles = _questionnaire_title_map() if briefs_by_id else {}
+
+    seen = changed = created_rows = 0
+    with transaction.atomic():
+        existing = {
+            row.interview_id: row
+            for row in SurveyInterviewCache.objects.filter(interview_id__in=list(briefs_by_id.keys()))
+        }
+        to_create: List[SurveyInterviewCache] = []
+        for iid, brief in briefs_by_id.items():
+            fields = _brief_to_fields(brief, q_titles)
+            if not fields.get("supervisor_name") and fields.get("responsible_name"):
+                derived = interviewer_map.get(_normalize_name(fields.get("responsible_name")))
+                if derived:
+                    fields["supervisor_name"] = derived
+            jext = _brief_json_ext(brief)
+            seen += 1
+            row = existing.get(iid)
+            if row is None:
+                obj = SurveyInterviewCache(interview_id=iid, status_changed_at=now, **fields)
+                obj.json_ext = jext
+                to_create.append(obj)
+                created_rows += 1
+                continue
+            update_fields = []
+            if (row.status or "") != (fields.get("status") or ""):
+                row.status_changed_at = now
+                changed += 1
+                update_fields.append("status_changed_at")
+            for k, v in fields.items():
+                if getattr(row, k) != v:
+                    setattr(row, k, v)
+                    update_fields.append(k)
+            if jext and row.json_ext != jext:
+                row.json_ext = jext
+                update_fields.append("json_ext")
+            if update_fields:
+                update_fields.append("updated_at")
+                row.save(update_fields=list(set(update_fields)))
+        if to_create:
+            SurveyInterviewCache.objects.bulk_create(to_create, batch_size=500, ignore_conflicts=True)
+    return seen, created_rows, changed
+
+
 def poll_interviews(
     questionnaire_id: Optional[str] = None,
     *,
@@ -859,82 +1055,48 @@ def poll_interviews(
     """
     Refresh the dashboard against HQ:
       1) exact status counts via cheap ``TotalCount`` queries (always),
-      2) optionally a *bounded* sample of interview briefs upserted into the
-         local cache (for the live feed / leaderboard / heatmap).
-
-    On a workspace with hundreds of thousands of interviews we never page through
-    them all — the headline KPIs come from (1), and (2) is just a recent sample.
+      2) optionally the recent-activity slice (GraphQL cursor on ``updateDateUtc``;
+         REST sample pages as fallback) upserted into the local cache,
+      3) a bounded hh_size harvest for new/changed interviews in the slice.
     """
     now = timezone.now()
 
-    # 1) status counts (exact, cheap)
+    # 1) status counts (exact, cheap). Only overwrite the cached counts if HQ
+    # actually answered — keep the last good values when it is unreachable.
     status_counts = fetch_status_counts(questionnaire_id)
     total_count = sum(status_counts.values()) if status_counts else 0
-    # Only overwrite the cached counts if HQ actually answered (don't blank the
-    # dashboard out when HQ is unreachable — keep the last good values).
     if status_counts and total_count > 0:
         _store_status_counts(questionnaire_id, status_counts)
 
-    seen = changed = created_rows = 0
+    seen = changed = created_rows = harvested = 0
     if with_sample:
         cap = sample_size if sample_size is not None else _to_int(_cfg("dashboard_sample_size", 600), 600)
-        roster = fetch_supervisor_roster()
-        interviewer_map = roster.get("interviewerMap", {}) if isinstance(roster, dict) else {}
-        # Collect + de-duplicate by interview id (HQ pages can overlap / repeat).
-        briefs_by_id: Dict[str, Dict[str, Any]] = {}
-        for b in iter_sample_briefs(questionnaire_id, max_interviews=int(cap or 0)):
-            iid = _first(b, "InterviewId", "Id", "interviewId")
-            if iid:
-                briefs_by_id[str(iid)] = b
-        briefs = list(briefs_by_id.items())  # (iid, brief)
-        q_titles = _questionnaire_title_map() if briefs else {}
-
-        with transaction.atomic():
-            existing = {
-                row.interview_id: row
-                for row in SurveyInterviewCache.objects.filter(interview_id__in=list(briefs_by_id.keys()))
-            }
-            to_create: List[SurveyInterviewCache] = []
-            for iid, brief in briefs:
-                fields = _brief_to_fields(brief, q_titles)
-                if not fields.get("supervisor_name") and fields.get("responsible_name"):
-                    derived = interviewer_map.get(_normalize_name(fields.get("responsible_name")))
-                    if derived:
-                        fields["supervisor_name"] = derived
-                jext = _brief_json_ext(brief)
-                seen += 1
-                row = existing.get(iid)
-                if row is None:
-                    obj = SurveyInterviewCache(interview_id=iid, status_changed_at=now, **fields)
-                    obj.json_ext = jext
-                    to_create.append(obj)
-                    created_rows += 1
-                    continue
-                update_fields = []
-                if (row.status or "") != (fields.get("status") or ""):
-                    row.status_changed_at = now
-                    changed += 1
-                    update_fields.append("status_changed_at")
-                for k, v in fields.items():
-                    if getattr(row, k) != v:
-                        setattr(row, k, v)
-                        update_fields.append(k)
-                if jext and row.json_ext != jext:
-                    row.json_ext = jext
-                    update_fields.append("json_ext")
-                if update_fields:
-                    update_fields.append("updated_at")
-                    row.save(update_fields=list(set(update_fields)))
-            if to_create:
-                SurveyInterviewCache.objects.bulk_create(to_create, batch_size=500, ignore_conflicts=True)
+        briefs = None
+        new_cursor = None
+        if _cfg("dashboard_graphql_enabled", True):
+            try:
+                briefs, new_cursor = fetch_recent_briefs(
+                    questionnaire_id, since=_load_cursor(questionnaire_id), max_interviews=int(cap or 0),
+                )
+            except Exception:
+                LOG.warning("Survey dashboard: GraphQL recent slice failed — falling back to REST sample", exc_info=True)
+        if briefs is None:
+            briefs = list(iter_sample_briefs(questionnaire_id, max_interviews=int(cap or 0)))
+        seen, created_rows, changed = _upsert_briefs(briefs)
+        if new_cursor:
+            cache.set(_cursor_key(questionnaire_id), new_cursor, None)
+        try:
+            harvested = _harvest_hh_sizes(questionnaire_id)
+        except Exception:
+            LOG.warning("Survey dashboard: hh_size harvest failed", exc_info=True)
 
     cache.set(_LAST_POLL_CACHE_KEY, now.isoformat(), None)
     LOG.info(
-        "Survey dashboard poll (qid=%s): totalCount=%s, sampled=%s (%s new, %s status changes)",
-        questionnaire_id or "ALL", total_count, seen, created_rows, changed,
+        "Survey dashboard poll (qid=%s): totalCount=%s, sampled=%s (%s new, %s status changes, %s hh_size fetched)",
+        questionnaire_id or "ALL", total_count, seen, created_rows, changed, harvested,
     )
     return {
-        "seen": seen, "created": created_rows, "changed": changed,
+        "seen": seen, "created": created_rows, "changed": changed, "harvested": harvested,
         "total_count": total_count, "status_counts": status_counts,
         "polled_at": now.isoformat(),
     }
@@ -1015,7 +1177,7 @@ def list_dashboard_questionnaires() -> List[Dict[str, Any]]:
         try:
             if not guid:
                 return
-            g0 = str(guid).split("$", 1)[0].strip()
+            g0 = str(guid).split("$", 1)[0].strip().replace("-", "")
             if not _looks_like_guid(g0):
                 return  # skip placeholders like "pending-auto-detection"
             ver = version if version not in (None, "") else None
@@ -1116,7 +1278,7 @@ def compute_metrics(questionnaire_id: Optional[str] = None, *, days: int = 30) -
     completed = status_counts.get(S_COMPLETED, 0)
     approved_sup = status_counts.get(S_APPROVED_BY_SUPERVISOR, 0)
     approved_hq = status_counts.get(S_APPROVED_BY_HEADQUARTERS, 0)
-    sent_to_capital = status_counts.get(S_SENT_TO_CAPITAL, 0)
+    sent_to_capital = status_counts.get(S_SENT_TO_CAPI, 0)
     rejected_sup = status_counts.get(S_REJECTED_BY_SUPERVISOR, 0)
     rejected_hq = status_counts.get(S_REJECTED_BY_HEADQUARTERS, 0)
     in_progress = sum(status_counts.get(s, 0) for s in IN_PROGRESS_STATUSES)
@@ -1125,7 +1287,7 @@ def compute_metrics(questionnaire_id: Optional[str] = None, *, days: int = 30) -
     rejected_total = rejected_sup + rejected_hq
     rejection_rate = round((rejected_total / completed_or_beyond) * 100.0, 1) if completed_or_beyond else 0.0
     target_total = _to_int(_cfg("dashboard_target_total", 0), 0) or total
-    roster = fetch_supervisor_roster()
+    roster = _load_roster()
     interviewer_map = roster.get("interviewerMap", {}) if isinstance(roster, dict) else {}
     supervisor_aliases = roster.get("supervisorAliases", {}) if isinstance(roster, dict) else {}
     household_metric = _load_household_metric(questionnaire_id)
@@ -1382,7 +1544,7 @@ def take_daily_snapshot(questionnaire_id: Optional[str] = None, status_counts: O
             "completed": g(S_COMPLETED),
             "approved_by_supervisor": g(S_APPROVED_BY_SUPERVISOR),
             "approved_by_hq": g(S_APPROVED_BY_HEADQUARTERS),
-            "sent_to_capital": g(S_SENT_TO_CAPITAL),
+            "sent_to_capital": g(S_SENT_TO_CAPI),
             "rejected_by_supervisor": g(S_REJECTED_BY_SUPERVISOR),
             "rejected_by_hq": g(S_REJECTED_BY_HEADQUARTERS),
             "cumulative_completed": completed_or_beyond,
@@ -1392,14 +1554,88 @@ def take_daily_snapshot(questionnaire_id: Optional[str] = None, status_counts: O
     )
 
 
+def _needs_backfill(questionnaire_id: Optional[str]) -> bool:
+    """True when HQ reports more Completed+ interviews than we hold hh_size for."""
+    counts = _load_status_counts(questionnaire_id) or {}
+    expected = sum(counts.get(s, 0) for s in COMPLETED_OR_BEYOND)
+    if not expected:
+        return False
+    have = (
+        _qs(questionnaire_id)
+        .filter(status__in=COMPLETED_OR_BEYOND, hh_size_fetched_at__isnull=False)
+        .count()
+    )
+    return have < expected
+
+
+def backfill_hh_size(
+    questionnaire_id: Optional[str],
+    *,
+    budget: Optional[int] = None,
+    throttle: Optional[float] = None,
+) -> Dict[str, Any]:
+    """
+    Seed the local cache with a questionnaire's interviews and harvest their
+    household-size answers: one bounded, throttled, resumable pass per call.
+    Run via the Celery task or the ``backfill_hh_size`` management command.
+    """
+    if budget is None:
+        budget = _to_int(_cfg("dashboard_hhsize_backfill_budget", 500), 500) or 500
+    if throttle is None:
+        try:
+            throttle = float(_cfg("dashboard_hhsize_backfill_throttle", 0.3) or 0)
+        except (TypeError, ValueError):
+            throttle = 0.3
+    guid, _v = _split_qid(questionnaire_id)
+    lock_key = f"api_etl:survey_dashboard:hhsize_backfill:{guid or 'ALL'}"
+    if cache.get(lock_key):
+        return {"skipped": "backfill already running"}
+    cache.set(lock_key, timezone.now().isoformat(), 3600)
+    try:
+        max_briefs = _to_int(_cfg("dashboard_max_interviews", 50000), 50000) or 50000
+        briefs, _cursor = fetch_recent_briefs(questionnaire_id, since=None, max_interviews=max_briefs)
+        seen, created, changed = _upsert_briefs(briefs)
+        harvested = _harvest_hh_sizes(questionnaire_id, budget=budget, throttle=throttle)
+        remaining = (
+            _qs(questionnaire_id)
+            .filter(status__in=COMPLETED_OR_BEYOND, hh_size_fetched_at__isnull=True)
+            .count()
+        )
+        LOG.info(
+            "Survey dashboard backfill (qid=%s): synced=%s (%s new), harvested=%s, remaining=%s",
+            questionnaire_id or "ALL", seen, created, harvested, remaining,
+        )
+        return {"synced": seen, "created": created, "harvested": harvested, "remaining": remaining}
+    finally:
+        cache.delete(lock_key)
+
+
+def _maybe_enqueue_backfill(questionnaire_id: Optional[str]) -> None:
+    if not _cfg("dashboard_hhsize_backfill_auto", True) or not questionnaire_id:
+        return
+    if not _needs_backfill(questionnaire_id):
+        return
+    try:
+        from api_etl.tasks import backfill_hh_size_task
+
+        backfill_hh_size_task.delay(questionnaire_id)
+    except Exception:
+        LOG.debug("Survey dashboard: could not enqueue hh_size backfill (no broker?)", exc_info=True)
+
+
 def refresh_dashboard(questionnaire_id: Optional[str] = None, *, with_sample: bool = True) -> Dict[str, Any]:
     result = poll_interviews(questionnaire_id=questionnaire_id, with_sample=with_sample)
     if with_sample:
-        try:
-            if questionnaire_id:
-                fetch_household_size_metric(questionnaire_id)
-        except Exception:
-            LOG.warning("Survey dashboard: household metric refresh failed during sync", exc_info=True)
+        targets = [questionnaire_id] if questionnaire_id else [
+            q.get("identity") for q in list_dashboard_questionnaires() if q.get("identity")
+        ]
+        for ident in targets:
+            try:
+                cache.delete(_household_metric_cache_key(ident))
+                fetch_household_size_metric(ident)
+            except Exception:
+                LOG.warning("Survey dashboard: household metric refresh failed for %s", ident, exc_info=True)
+            _maybe_enqueue_backfill(ident)
     try:
         if result.get("total_count"):  # don't write an all-zero snapshot when HQ was unreachable
             take_daily_snapshot(questionnaire_id=questionnaire_id, status_counts=result.get("status_counts"))

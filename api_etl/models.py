@@ -320,6 +320,12 @@ class SurveyInterviewCache(models.Model):
     # Rough proxy: minutes between creation and last entry.
     duration_minutes = models.FloatField(blank=True, null=True)
 
+    # Live-harvested answer of the configured household-size question, fetched
+    # once per interview from /api/v1/interviews/{id} and re-fetched only when
+    # the interview changes after hh_size_fetched_at.
+    hh_size = models.FloatField(blank=True, null=True)
+    hh_size_fetched_at = models.DateTimeField(blank=True, null=True)
+
     json_ext = models.JSONField(db_column="Json_ext", blank=True, default=dict)
 
     class Meta:

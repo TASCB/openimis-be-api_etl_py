@@ -313,6 +313,21 @@ def poll_survey_dashboard_task(questionnaire_id: Optional[str] = None, with_samp
         return {"error": str(exc)}
 
 
+@shared_task(name="api_etl.backfill_hh_size")
+def backfill_hh_size_task(questionnaire_id: Optional[str] = None, budget: Optional[int] = None):
+    """One bounded backfill pass; re-enqueues itself until the scope is covered."""
+    from api_etl.services.survey_dashboard_service import backfill_hh_size
+
+    try:
+        result = backfill_hh_size(questionnaire_id, budget=budget)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Survey dashboard hh_size backfill failed: %s", exc)
+        return {"error": str(exc)}
+    if (result or {}).get("remaining"):
+        backfill_hh_size_task.apply_async(args=[questionnaire_id, budget], countdown=30)
+    return result
+
+
 def poll_survey_dashboard_periodic(*args, **kwargs):
     """
     Plain (non-Celery) callable for the openIMIS APScheduler — wired via
