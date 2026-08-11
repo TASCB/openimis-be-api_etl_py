@@ -8,9 +8,11 @@ import zipfile
 import copy
 import hashlib
 import json
+from contextlib import contextmanager
 from typing import Dict, Iterable, Iterator, List, Optional, Union
 
 import requests
+from django.utils import timezone
 
 from api_etl.apps import ApiEtlConfig as C
 from api_etl.sources.base import DataSource
@@ -140,6 +142,39 @@ class SurveySolutionsExportSource(DataSource):
     @classmethod
     def clear_questionnaire_list_cache(cls):
         cls._questionnaire_list_cache.clear()
+
+    # Wall clock spent on the HQ side, accumulated across questionnaire ids and
+    # read back by the caller after the pull.
+
+    @property
+    def phase_timings(self) -> Dict[str, object]:
+        if getattr(self, "_phase_timings", None) is None:
+            self._phase_timings: Dict[str, object] = {
+                "export_create_seconds": 0.0,
+                "export_wait_seconds": 0.0,
+                "export_download_seconds": 0.0,
+                "export_jobs": [],
+            }
+        return self._phase_timings
+
+    @contextmanager
+    def _timed(self, key: str):
+        started = time.monotonic()
+        try:
+            yield
+        finally:
+            elapsed = time.monotonic() - started
+            timings = self.phase_timings
+            timings[key] = round(float(timings.get(key, 0.0)) + elapsed, 3)
+
+    def _record_export_window(self, started_at, completed_at) -> None:
+        timings = self.phase_timings
+        first = timings.get("export_started_at")
+        if first is None or started_at < first:
+            timings["export_started_at"] = started_at
+        last = timings.get("export_completed_at")
+        if last is None or completed_at > last:
+            timings["export_completed_at"] = completed_at
 
     @staticmethod
     def _cache_key(*, endpoint_base: str, auth_type: Optional[str], username: Optional[str], bearer: Optional[str]) -> str:
@@ -550,6 +585,7 @@ class SurveySolutionsExportSource(DataSource):
                     LOG.info(
                         "Export job created: %s (qid=%s)", job_id, questionnaire_id
                     )
+                    self._last_job_reused = False
                     return job_id
 
                 # ---- Client/other error: do not retry by default ----
@@ -585,6 +621,7 @@ class SurveySolutionsExportSource(DataSource):
                         )
                         if jid:
                             LOG.info("Fallback: reusing Completed export job: %s", jid)
+                            self._last_job_reused = True
                             return jid
 
                     # Raise into the HTTPError handler (keeps original behavior)
@@ -627,6 +664,7 @@ class SurveySolutionsExportSource(DataSource):
                 page_size=int(getattr(C, "export_list_page_size", 50) or 50),
             )
             if jid:
+                self._last_job_reused = True
                 return jid
 
         if last_exc:
@@ -752,28 +790,45 @@ class SurveySolutionsExportSource(DataSource):
         yield_source_meta: bool,
         workspace: Optional[str],
     ) -> Iterator[Dict]:
-        job_id = self._create_job(
-            endpoint_base=endpoint_base,
-            questionnaire_id=questionnaire_id,
-            export_format=export_format
-            or getattr(C, "export_format", "Tabular")
-            or "Tabular",
-            interview_status=interview_status
-            or getattr(C, "export_interview_status", "All")
-            or "All",
-            include_meta=(
-                include_meta
-                if include_meta is not None
-                else getattr(C, "export_include_meta", None)
-            ),
-            from_dt=from_dt,
-            to_dt=to_dt,
-            rkwargs=rkwargs,
-        )
+        self._last_job_reused = False
+        export_started_at = timezone.now()
+        with self._timed("export_create_seconds"):
+            job_id = self._create_job(
+                endpoint_base=endpoint_base,
+                questionnaire_id=questionnaire_id,
+                export_format=export_format
+                or getattr(C, "export_format", "Tabular")
+                or "Tabular",
+                interview_status=interview_status
+                or getattr(C, "export_interview_status", "All")
+                or "All",
+                include_meta=(
+                    include_meta
+                    if include_meta is not None
+                    else getattr(C, "export_include_meta", None)
+                ),
+                from_dt=from_dt,
+                to_dt=to_dt,
+                rkwargs=rkwargs,
+            )
         # Poll only if we actually created a fresh job; if we reused a completed job,
         # polling will immediately return completed anyway.
-        self._poll_until_complete(endpoint_base, job_id, rkwargs)
-        zip_path = self._download_zip(endpoint_base, job_id, rkwargs)
+        wait_started = time.monotonic()
+        with self._timed("export_wait_seconds"):
+            self._poll_until_complete(endpoint_base, job_id, rkwargs)
+        wait_seconds = round(time.monotonic() - wait_started, 3)
+        self._record_export_window(export_started_at, timezone.now())
+        self.phase_timings["export_jobs"].append(
+            {
+                "job_id": job_id,
+                "questionnaire_id": questionnaire_id,
+                "reused": bool(getattr(self, "_last_job_reused", False)),
+                "wait_seconds": wait_seconds,
+            }
+        )
+
+        with self._timed("export_download_seconds"):
+            zip_path = self._download_zip(endpoint_base, job_id, rkwargs)
 
         # Resolve include filter (from CLI or config)
         name_filter = (

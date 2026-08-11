@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 import unicodedata
 from typing import Any, Dict, Iterable, List, Optional, DefaultDict, Tuple
 from collections import defaultdict
@@ -490,6 +491,39 @@ class SurveySolutionService(_BaseService):
                 "Failed to wire Source session/auth; continuing with defaults"
             )
 
+    def _collect_timings(self, **service_phases: float) -> Dict[str, Any]:
+        """
+        Merge our per-phase wall clock with the Source's HQ-side timings into one
+        JSON-safe dict. `export_wait_seconds` is Survey Solutions' time;
+        everything else is ours.
+        """
+        timings: Dict[str, Any] = dict(service_phases)
+
+        source_timings = dict(getattr(self.source, "phase_timings", {}) or {})
+        for key in ("export_started_at", "export_completed_at"):
+            value = source_timings.pop(key, None)
+            timings[key] = value.isoformat() if value is not None else None
+        timings.update(source_timings)
+
+        hq_seconds = sum(
+            float(timings.get(k, 0.0) or 0.0)
+            for k in (
+                "export_create_seconds",
+                "export_wait_seconds",
+                "export_download_seconds",
+            )
+        )
+        # Fetch time beyond the HQ round-trips: unzip, tab parsing, materialisation.
+        timings["export_read_seconds"] = round(
+            max(0.0, float(timings.get("fetch_seconds", 0.0) or 0.0) - hq_seconds), 3
+        )
+
+        total = float(timings.get("total_seconds", 0.0) or 0.0)
+        wait = float(timings.get("export_wait_seconds", 0.0) or 0.0)
+        timings["export_wait_share_pct"] = round(100.0 * wait / total, 1) if total else None
+        timings["our_processing_seconds"] = round(max(0.0, total - wait), 3)
+        return timings
+
     def _maybe_map_gender(self, g: Any) -> Any:
         try:
             m = self.config.get("adapter_gender_map")
@@ -749,6 +783,12 @@ class SurveySolutionService(_BaseService):
         **source_overrides,
     ) -> Dict[str, Any]:
         cfg = self.config
+        run_started = time.monotonic()
+        # A shared Source would otherwise accumulate across runs.
+        try:
+            self.source._phase_timings = None
+        except Exception:
+            LOG.debug("Could not reset Source phase timings", exc_info=True)
 
         # Resolve QIDs
         qids: List[str] = []
@@ -859,17 +899,21 @@ class SurveySolutionService(_BaseService):
             raise RuntimeError("Source must expose .pull(...) or .rows(...)")
 
         # Collect rows (respect max_rows short-circuit)
+        fetch_started = time.monotonic()
         all_raw: List[Dict[str, Any]] = []
         for raw in rows_iter:
             all_raw.append(raw)
             if max_rows and len(all_raw) >= max_rows:
                 break
         total_raw = len(all_raw)
+        fetch_seconds = round(time.monotonic() - fetch_started, 3)
 
         LOG.info("SurveySolutionsExport: pulled %s raw row(s) from HQ", total_raw)
 
         # Merge HH + roster
+        merge_started = time.monotonic()
         merged_raw = self._merge_household_roster(all_raw)
+        merge_seconds = round(time.monotonic() - merge_started, 3)
         total_merged = len(merged_raw)
 
         LOG.info(
@@ -888,6 +932,7 @@ class SurveySolutionService(_BaseService):
             )
 
         # Transform to Individual payloads (base + json_ext)
+        transform_started = time.monotonic()
         transformed: List[Dict[str, Any]] = []
         per_qid_counts: Dict[str, int] = {}
         for idx, r in enumerate(merged_raw, start=1):
@@ -919,6 +964,7 @@ class SurveySolutionService(_BaseService):
                 if q:
                     per_qid_counts[q] = per_qid_counts.get(q, 0) + 1
 
+        transform_seconds = round(time.monotonic() - transform_started, 3)
         total_xform = len(transformed)
         if total_xform == 0:
             LOG.error(
@@ -933,13 +979,16 @@ class SurveySolutionService(_BaseService):
         )
 
         # PMT enrichment (config default OR flag)
+        enrich_seconds = 0.0
         do_enrich = _bool(cfg.get("enrich_pmt_default"), False) or bool(enrich_pmt)
         if do_enrich and transformed:
+            enrich_started = time.monotonic()
             try:
                 transformed = enrich_rows_with_pmt(transformed, hh_key=hh_key)
                 LOG.info("PMT enrichment complete (hh_key=%s)", hh_key)
             except Exception:
                 LOG.exception("PMT enrichment failed; continuing without PMT.")
+            enrich_seconds = round(time.monotonic() - enrich_started, 3)
         elif do_enrich and not transformed:
             LOG.info(
                 "PMT enrichment enabled but there are no transformed rows; skipping enrichment step."
@@ -950,7 +999,9 @@ class SurveySolutionService(_BaseService):
         # in the same run — avoids "imported some, then failed" partial state.
         batch_id = get_timestamped_batch_identifier(prefix="ss_individuals_")
         total_pushed = 0
+        load_seconds = 0.0
         if self.sink and not dry_run and transformed:
+            load_started = time.monotonic()
             with transaction.atomic():
                 if self.batch_size <= 1:
                     self.sink.push(transformed, batch_identifier=batch_id)
@@ -961,6 +1012,16 @@ class SurveySolutionService(_BaseService):
                             transformed[i : i + self.batch_size], batch_identifier=batch_id
                         )
                         total_pushed += len(transformed[i : i + self.batch_size])
+            load_seconds = round(time.monotonic() - load_started, 3)
+
+        timings = self._collect_timings(
+            fetch_seconds=fetch_seconds,
+            merge_seconds=merge_seconds,
+            transform_seconds=transform_seconds,
+            enrich_seconds=enrich_seconds,
+            load_seconds=load_seconds,
+            total_seconds=round(time.monotonic() - run_started, 3),
+        )
 
         summary = {
             "questionnaires": qids,
@@ -972,6 +1033,7 @@ class SurveySolutionService(_BaseService):
             "per_questionnaire_counts": per_qid_counts,
             "batch_identifier": batch_id,
             "pmt_enriched": bool(do_enrich),
+            "timings": timings,
         }
 
         file_obj = (
@@ -985,6 +1047,18 @@ class SurveySolutionService(_BaseService):
             transformed, source_name="survey_solutions"
         )
 
+        LOG.info(
+            "Import timing: total=%ss export_wait=%ss (%s%%) read=%ss merge=%ss "
+            "transform=%ss enrich=%ss load=%ss",
+            timings.get("total_seconds"),
+            timings.get("export_wait_seconds"),
+            timings.get("export_wait_share_pct"),
+            timings.get("export_read_seconds"),
+            timings.get("merge_seconds"),
+            timings.get("transform_seconds"),
+            timings.get("enrich_seconds"),
+            timings.get("load_seconds"),
+        )
         LOG.info("SurveySolutionService finished: %s", summary)
         return {
             "summary": summary,
@@ -1142,6 +1216,8 @@ class SurveySolutionService(_BaseService):
                 try:
                     history.status = "failed"
                     history.error_message = str(e)
+                    # A failed run still shows where the time went.
+                    history.apply_timings(self._collect_timings())
                     history.save()
                 except Exception as update_error:
                     LOG.warning(

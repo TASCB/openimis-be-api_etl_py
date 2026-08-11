@@ -1,8 +1,18 @@
 # api_etl/models.py
 from django.db import models
 from django.conf import settings
+from django.utils.dateparse import parse_datetime
 from datetime import datetime
 from core.models import User, HistoryModel
+
+
+def parse_datetime_value(value):
+    """Accept an ISO string or a datetime; return a datetime or None."""
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str) and value:
+        return parse_datetime(value)
+    return None
 
 
 class SurveySolutionsConfig(models.Model):
@@ -187,6 +197,25 @@ class PulledHistory(HistoryModel):
         """Total individuals (members) affected in this run (inserted + updated)."""
         return self.n_individuals_inserted + self.n_individuals_updated
 
+    def apply_timings(self, timings: dict) -> None:
+        """
+        Populate the export window from a run's phase timings and keep the raw
+        breakdown in json_ext. Does not save.
+        """
+        if not timings:
+            return
+
+        started = parse_datetime_value(timings.get("export_started_at"))
+        completed = parse_datetime_value(timings.get("export_completed_at"))
+        if started:
+            self.export_started_at = started
+        if completed:
+            self.export_completed_at = completed
+
+        if not self.json_ext:
+            self.json_ext = {}
+        self.json_ext["timings"] = timings
+
     def update_counts_from_etl_result(self, etl_result: dict, user=None):
         """
         Update counts from ETL result summary.
@@ -219,6 +248,8 @@ class PulledHistory(HistoryModel):
         # For now, assume all households were inserted (simplified)
         self.n_households_inserted = self.number_of_households
         self.n_households_updated = 0
+
+        self.apply_timings(summary.get("timings") or {})
 
         # Store run metadata in json_ext
         if not self.json_ext:
