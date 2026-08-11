@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from typing import Dict, Iterable, Iterator, List, Optional, Union
 
 import requests
+from django.core.cache import cache as django_cache
 from django.utils import timezone
 
 from api_etl.apps import ApiEtlConfig as C
@@ -138,10 +139,42 @@ class SurveySolutionsExportSource(DataSource):
     api_prefix: str = "/api/v2"
     meta_api_prefix: str = "/api/v1"
     _questionnaire_list_cache: Dict[str, Dict] = {}
+    _QUESTIONNAIRE_CACHE_PREFIX = "api_etl:questionnaire_list:"
+    _QUESTIONNAIRE_CACHE_INDEX = "api_etl:questionnaire_list:keys"
+
+    @classmethod
+    def _shared_cache_key(cls, cache_key: str) -> str:
+        return f"{cls._QUESTIONNAIRE_CACHE_PREFIX}{cache_key}"
+
+    @classmethod
+    def _questionnaire_cache_get(cls, cache_key: str):
+        try:
+            return django_cache.get(cls._shared_cache_key(cache_key))
+        except Exception:
+            LOG.debug("Shared questionnaire cache unavailable on read", exc_info=True)
+            return None
+
+    @classmethod
+    def _questionnaire_cache_set(cls, cache_key: str, data, ttl: int) -> None:
+        try:
+            django_cache.set(cls._shared_cache_key(cache_key), data, timeout=ttl)
+            known = django_cache.get(cls._QUESTIONNAIRE_CACHE_INDEX) or []
+            if cache_key not in known:
+                django_cache.set(
+                    cls._QUESTIONNAIRE_CACHE_INDEX, known + [cache_key], timeout=None
+                )
+        except Exception:
+            LOG.debug("Shared questionnaire cache unavailable on write", exc_info=True)
 
     @classmethod
     def clear_questionnaire_list_cache(cls):
         cls._questionnaire_list_cache.clear()
+        try:
+            for cache_key in django_cache.get(cls._QUESTIONNAIRE_CACHE_INDEX) or []:
+                django_cache.delete(cls._shared_cache_key(cache_key))
+            django_cache.delete(cls._QUESTIONNAIRE_CACHE_INDEX)
+        except Exception:
+            LOG.debug("Shared questionnaire cache unavailable on clear", exc_info=True)
 
     # Wall clock spent on the HQ side, accumulated across questionnaire ids and
     # read back by the caller after the pull.
@@ -250,6 +283,13 @@ class SurveySolutionsExportSource(DataSource):
             bearer=bearer,
         )
         if cache_seconds > 0:
+            shared = self._questionnaire_cache_get(cache_key)
+            if shared:
+                LOG.info(
+                    "Using shared Survey Solutions questionnaire list (%d item(s))",
+                    len(shared),
+                )
+                return copy.deepcopy(shared)
             cached = self._questionnaire_list_cache.get(cache_key)
             if cached and cached.get("expires_at", 0) > time.time():
                 LOG.info(
@@ -351,17 +391,18 @@ class SurveySolutionsExportSource(DataSource):
         # Step 2: For each GUID, fetch all versions
         all_questionnaires: List[Dict] = []
 
+        meta_session = requests.Session()
+        meta_session.headers.update(headers)
+        for key, value in rkwargs.items():
+            if key != "headers":
+                setattr(meta_session, key, value)
+
         for guid in unique_guids:
             try:
                 version_url = f"{endpoint_base}/questionnaires/{guid}"
                 LOG.debug("Fetching versions from: %s", version_url)
 
-                r_versions = requests.get(
-                    version_url,
-                    headers=headers,
-                    timeout=30,
-                    **{k: v for k, v in rkwargs.items() if k != "headers"},
-                )
+                r_versions = meta_session.get(version_url, timeout=30)
                 r_versions.raise_for_status()
 
                 versions_data = r_versions.json()
@@ -421,6 +462,9 @@ class SurveySolutionsExportSource(DataSource):
                 "expires_at": time.time() + cache_seconds,
                 "data": copy.deepcopy(all_questionnaires),
             }
+            self._questionnaire_cache_set(
+                cache_key, copy.deepcopy(all_questionnaires), cache_seconds
+            )
         return all_questionnaires
 
     # ------------------- low-level Export API calls -------------------
