@@ -2,7 +2,7 @@ import re
 from datetime import datetime
 
 import graphene
-from django.db.models import Q
+from django.db.models import Case, IntegerField, Q, Value, When
 from graphene_django import DjangoObjectType
 from individual.models import Individual
 
@@ -220,7 +220,18 @@ def resolve_pulled_questionnaires(root, info, **kwargs):
 
     fail_stale_running_imports(district_code=district_code, user=info.context.user)
 
-    queryset = queryset.order_by("-date_pulled", "-id")
+    # Attention order, then recency. Sorted here rather than in the FE because the field is
+    # a paginated relay connection -- a client-side sort only reorders the current page, so a
+    # running import could sit on page 2.
+    queryset = queryset.annotate(
+        status_rank=Case(
+            When(status="running", then=Value(0)),
+            When(status="failed", then=Value(1)),
+            When(status="cancelled", then=Value(2)),
+            default=Value(3),
+            output_field=IntegerField(),
+        )
+    ).order_by("status_rank", "-date_pulled", "-id")
 
     if not queryset.exists():
         return _get_fallback_pulled_questionnaires(region_code, district_code)
