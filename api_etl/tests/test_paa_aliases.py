@@ -4,9 +4,11 @@ import unittest
 
 from api_etl.paa_aliases import (
     are_paa_equivalent,
+    district_suffixes_conflict,
     get_location_codes_for_paa_scope,
     get_paa_alias_candidates,
     get_paa_scope,
+    split_district_token,
 )
 
 
@@ -47,6 +49,36 @@ class PaaAliasesTests(unittest.TestCase):
         candidates = get_paa_alias_candidates("Kaskazini Pemba")
         self.assertIn("pemba", candidates)
         self.assertIn("kusini pemba", candidates)
+
+
+class DistrictTokenTests(unittest.TestCase):
+    def test_council_suffix_is_split_from_the_base_name(self):
+        self.assertEqual(split_district_token("MISSENYIDC"), ("MISSENYI", "DC"))
+        self.assertEqual(split_district_token("Kasulu TC"), ("KASULU", "TC"))
+        self.assertEqual(split_district_token("Iringa MC"), ("IRINGA", "MC"))
+
+    def test_bare_district_name_has_no_suffix(self):
+        self.assertEqual(split_district_token("Kasulu"), ("KASULU", ""))
+        self.assertEqual(split_district_token("Mjini Magharibi"), ("MJINI MAGHARIBI", ""))
+
+    def test_questionnaire_version_marker_is_ignored(self):
+        self.assertEqual(split_district_token("MISSENYIDC_2"), ("MISSENYI", "DC"))
+        self.assertEqual(split_district_token("KASULUDC_3"), ("KASULU", "DC"))
+
+    def test_reissued_questionnaire_still_matches_its_district(self):
+        self.assertFalse(district_suffixes_conflict("MISSENYIDC_2", "Missenyi"))
+        self.assertFalse(district_suffixes_conflict("MISSENYIDC", "Missenyi"))
+
+    def test_district_council_does_not_match_the_town_council(self):
+        self.assertTrue(district_suffixes_conflict("KASULUDC", "Kasulu TC"))
+        self.assertTrue(district_suffixes_conflict("KASULUDC_2", "Kasulu TC"))
+        self.assertTrue(district_suffixes_conflict("IRINGADC", "Iringa MC"))
+
+    def test_matching_council_types_and_bare_names_are_compatible(self):
+        self.assertFalse(district_suffixes_conflict("KASULUTC", "Kasulu TC"))
+        self.assertFalse(district_suffixes_conflict("KASULUDC", "Kasulu"))
+        self.assertFalse(district_suffixes_conflict("IRINGAMC", "Iringa MC"))
+        self.assertFalse(district_suffixes_conflict("UNGUJA", "Mjini Magharibi"))
 
 
 if __name__ == "__main__":

@@ -7,10 +7,12 @@ from graphene_django import DjangoObjectType
 from individual.models import Individual
 
 from api_etl.paa_aliases import (
+    district_suffixes_conflict,
     get_paa_alias_candidates,
     get_paa_aliases,
     get_paa_scope,
     scopes_for_codes,
+    split_district_token,
 )
 from .models import PulledHistory
 
@@ -27,16 +29,8 @@ def _strip_district_suffix(district_name, suffixes=None):
 
         suffixes = getattr(ApiEtlConfig, "district_name_suffixes", ["DC", "TC", "MC"])
 
-    district_upper = district_name.upper().strip()
-
-    for suffix in suffixes:
-        suffix_upper = suffix.upper()
-        if district_upper.endswith(" " + suffix_upper):
-            return district_upper[: -(len(suffix_upper) + 1)].strip()
-        elif district_upper.endswith(suffix_upper):
-            return district_upper[: -len(suffix_upper)].strip()
-
-    return district_upper
+    base, _ = split_district_token(district_name, suffixes)
+    return base
 
 
 def _extract_district_from_questionnaire(questionnaire_title, prefix=None):
@@ -392,6 +386,14 @@ def _filter_questionnaires_by_paa(questionnaires, district_name=None, district_c
 
         q_district = _extract_district_from_questionnaire(title, prefix)
         q_district_base = _strip_district_suffix(q_district, suffixes)
+
+        # KASULUDC must not match the neighbouring "Kasulu TC" location.
+        if district_name and district_suffixes_conflict(q_district, district_name, suffixes):
+            q2 = dict(q)
+            q2["matching_score"] = 0
+            q2["matching_strategy"] = "suffix-conflict"
+            scored.append(q2)
+            continue
 
         q_norm = _normalize_text(q_district)
         q_base_norm = _normalize_text(q_district_base)

@@ -5,6 +5,12 @@ import unicodedata
 from typing import Any, Dict, Iterable, List, Optional, Set
 
 
+DEFAULT_DISTRICT_SUFFIXES: List[str] = ["DC", "TC", "MC"]
+
+# Questionnaires are re-issued per district as "<DISTRICT>_2", "<DISTRICT>_3", ...
+_VERSION_SUFFIX_RE = re.compile(r"[_\-\s]+\d+\s*$")
+
+
 DEFAULT_PAA_ALIASES: Dict[str, Dict[str, List[str]]] = {
     "PEMBA": {
         "codes": ["54", "55"],
@@ -15,6 +21,53 @@ DEFAULT_PAA_ALIASES: Dict[str, Dict[str, List[str]]] = {
         "names": ["UNGUJA", "KASKAZINI UNGUJA", "KUSINI UNGUJA", "MJINI MAGHARIBI"],
     },
 }
+
+
+def split_district_token(value: Any, suffixes: Optional[Iterable[str]] = None) -> tuple:
+    """
+    Split a district token into ``(base, council_suffix)``.
+
+    A trailing questionnaire version marker is dropped first, so ``MISSENYIDC_2``
+    and ``MISSENYIDC`` both yield ``("MISSENYI", "DC")``. The suffix is ``""`` for
+    a bare district name.
+    """
+    if not value:
+        return "", ""
+
+    if suffixes is None:
+        suffixes = DEFAULT_DISTRICT_SUFFIXES
+
+    text = _VERSION_SUFFIX_RE.sub("", str(value).upper().strip()).strip()
+
+    for suffix in suffixes or []:
+        s = str(suffix).upper().strip()
+        if not s:
+            continue
+        if text.endswith(" " + s):
+            return text[: -(len(s) + 1)].strip(), s
+        if text.endswith(s) and len(text) > len(s):
+            return text[: -len(s)].strip(), s
+
+    return text, ""
+
+
+def district_suffixes_conflict(
+    left: Any, right: Any, suffixes: Optional[Iterable[str]] = None
+) -> bool:
+    """
+    True when both tokens name an explicit council type and the types differ.
+
+    openIMIS stores the district council without a suffix -- "Kasulu" is Kasulu DC
+    and sits beside a separate "Kasulu TC" -- so a bare name stays compatible with
+    any council type and only two explicit, differing suffixes are a conflict.
+    """
+    _, left_suffix = split_district_token(left, suffixes)
+    _, right_suffix = split_district_token(right, suffixes)
+
+    if not left_suffix or not right_suffix:
+        return False
+
+    return left_suffix != right_suffix
 
 
 def normalize_paa_name(value: Any) -> str:

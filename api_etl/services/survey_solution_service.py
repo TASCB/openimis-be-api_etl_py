@@ -14,7 +14,11 @@ from api_etl.workflows.pmt import enrich_rows_with_pmt
 
 from api_etl.services.base import ETLService as _BaseService
 from api_etl.apps import ApiEtlConfig as C
-from api_etl.paa_aliases import get_paa_alias_candidates, get_paa_scope
+from api_etl.paa_aliases import (
+    district_suffixes_conflict,
+    get_paa_alias_candidates,
+    get_paa_scope,
+)
 
 # Source / Adapter
 from api_etl.sources.survey_solutions_export_source import (
@@ -116,6 +120,16 @@ def _score_questionnaire_match(
     title = questionnaire.get("Title", "")
     if not title:
         return 0, "no-title"
+
+    if district_name:
+        from api_etl.gql_queries import _extract_district_from_questionnaire
+
+        q_token = _extract_district_from_questionnaire(
+            title, _cfg_get(config, "questionnaire_title_prefix", default=None)
+        )
+        suffixes = _cfg_get(config, "district_name_suffixes", default=None)
+        if district_suffixes_conflict(q_token, district_name, suffixes):
+            return 0, "suffix-conflict"
 
     # Get configuration
     stop_words = _cfg_get(

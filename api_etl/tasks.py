@@ -9,7 +9,11 @@ from django.utils import timezone
 
 from api_etl.apps import ApiEtlConfig
 from api_etl.models import PulledHistory
-from api_etl.paa_aliases import are_paa_equivalent, get_paa_scope
+from api_etl.paa_aliases import (
+    are_paa_equivalent,
+    district_suffixes_conflict,
+    get_paa_scope,
+)
 from api_etl.utils import ETL_CLASS, get_class_by_name, get_classes_in_module
 
 logger = logging.getLogger(__name__)
@@ -92,6 +96,13 @@ def _validate_questionnaire_for_paa(
     q_district = _extract_district_from_questionnaire(q_title, prefix)
     q_district_base = _strip_district_suffix(q_district, suffixes)
     paa_base = _strip_district_suffix(paa_name, suffixes)
+
+    if district_suffixes_conflict(q_district, paa_name, suffixes):
+        return (
+            "Questionnaire validation failed: "
+            f"Selected questionnaire '{q_title}' targets a different council type than "
+            f"PAA/district '{paa_name}'. Expected PAA/district: '{paa_name}', Found: '{q_district}'"
+        )
 
     if are_paa_equivalent(q_district_base, paa_base, ApiEtlConfig):
         return None
