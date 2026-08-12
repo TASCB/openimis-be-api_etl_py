@@ -231,6 +231,7 @@ DEFAULT_CONFIG = {
     "dashboard_household_size_variable": "hh_size",
     # Household-size harvesting (see docs/SURVEY_DASHBOARD_DEVELOPER_GUIDE.md).
     "dashboard_hhsize_fetch_budget": 50,
+    "dashboard_hhsize_max_consecutive_failures": 5,
     "dashboard_hhsize_backfill_budget": 500,
     "dashboard_hhsize_backfill_throttle": 0.3,
     "dashboard_hhsize_backfill_auto": True,

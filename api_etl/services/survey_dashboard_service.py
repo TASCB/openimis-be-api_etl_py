@@ -392,18 +392,34 @@ def _household_variable() -> str:
 
 
 def _household_metric_from_cache(questionnaire_id: Optional[str]) -> Dict[str, Any]:
-    """Aggregate the locally harvested per-interview household-size answers."""
-    scope = _qs(questionnaire_id).filter(status__in=COMPLETED_OR_BEYOND)
-    agg = scope.filter(hh_size__isnull=False).aggregate(total=Sum("hh_size"), n=Count("id"))
+    """Aggregate the locally harvested per-interview household-size answers.
+
+    Every in-scope interview lands in exactly one of three buckets, so callers can
+    tell a complete total from a partial one:
+      answered   -- a valid numeric answer we summed
+      noAnswer   -- harvested, but the variable was absent or non-numeric
+      pending    -- not harvested yet
+    """
+    agg = _qs(questionnaire_id).filter(status__in=COMPLETED_OR_BEYOND).aggregate(
+        total=Sum("hh_size"),
+        n=Count("id", filter=Q(hh_size__isnull=False)),
+        no_answer=Count("id", filter=Q(hh_size__isnull=True, hh_size_fetched_at__isnull=False)),
+        pending=Count("id", filter=Q(hh_size_fetched_at__isnull=True)),
+    )
     count = int(agg["n"] or 0)
     total = float(agg["total"] or 0)
-    pending = scope.filter(hh_size_fetched_at__isnull=True).count()
+    pending = int(agg["pending"] or 0)
+    no_answer = int(agg["no_answer"] or 0)
+    in_scope = count + no_answer + pending
     return {
         "total": round(total) if count else None,
         "average": round(total / count, 1) if count else None,
         "count": count if count else (0 if pending == 0 else None),
         "variable": _household_variable(),
         "pending": pending,
+        "noAnswer": no_answer,
+        "inScope": in_scope,
+        "coverage": round((count + no_answer) / in_scope * 100.0, 1) if in_scope else None,
         "source": "live-harvest",
     }
 
@@ -422,7 +438,9 @@ def _invalidate_household_metric(questionnaire_id: Optional[str] = None) -> None
 
 
 # Status scope used for both the /statistics report and the local aggregate.
-_STATS_SCOPE_STATUSES = [S_COMPLETED, S_APPROVED_BY_SUPERVISOR, S_REJECTED_BY_HEADQUARTERS, S_APPROVED_BY_HEADQUARTERS]
+# Derived from COMPLETED_OR_BEYOND so the two rungs of the source ladder can never
+# drift apart and report different populations for the same KPI.
+_STATS_SCOPE_STATUSES = sorted(COMPLETED_OR_BEYOND)
 
 
 def _fetch_statistics_metric(questionnaire_id: Optional[str], token: str) -> Optional[Dict[str, Any]]:
@@ -524,7 +542,17 @@ def fetch_household_size_metric(questionnaire_id: Optional[str]) -> Dict[str, An
                     LOG.debug("Survey dashboard: /statistics failed for discovered token %s", discovered, exc_info=True)
 
     if result:
-        result = {**result, "variable": variable, "source": "statistics"}
+        # HQ aggregated the whole scope server-side, so coverage is complete by
+        # definition -- keep the same keys the harvested path returns.
+        result = {
+            **result,
+            "variable": variable,
+            "source": "statistics",
+            "pending": 0,
+            "noAnswer": 0,
+            "inScope": result.get("count"),
+            "coverage": 100.0,
+        }
     else:
         result = _household_metric_from_cache(questionnaire_id)
     cache.set(cache_key, result, _to_int(_cfg("dashboard_question_stats_cache_seconds", 600), 600) or 600)
@@ -557,13 +585,39 @@ def _harvest_hh_sizes(questionnaire_id: Optional[str] = None, *, budget: Optiona
         .filter(Q(hh_size_fetched_at__isnull=True) | Q(server_updated_at_utc__gt=F("hh_size_fetched_at")))
         .order_by(F("hh_size_fetched_at").asc(nulls_first=True), "-server_updated_at_utc")
     )
+    max_transient = _to_int(_cfg("dashboard_hhsize_max_consecutive_failures", 5), 5) or 5
     done = 0
+    transient = 0
     for row in rows[: max(1, budget)]:
         try:
             value = _fetch_interview_hh_size(row.interview_id, variable)
+        except HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else None
+            if status is not None and 400 <= status < 500:
+                # The interview is gone or unreadable at HQ. Stamp it so it leaves
+                # the head of the queue -- ordering is fetched_at NULLS FIRST, so
+                # leaving it unstamped blocks every older row indefinitely. It then
+                # shows up as noAnswer rather than silently stalling the sweep.
+                row.hh_size = None
+                row.hh_size_fetched_at = timezone.now()
+                row.save(update_fields=["hh_size", "hh_size_fetched_at", "updated_at"])
+                LOG.info("Survey dashboard: hh_size unavailable for %s (HTTP %s) — marked as no-answer", row.interview_id, status)
+                done += 1
+                continue
+            transient += 1
+            LOG.warning("Survey dashboard: hh_size fetch failed for %s (HTTP %s)", row.interview_id, status, exc_info=True)
+            if transient >= max_transient:
+                LOG.warning("Survey dashboard: %s consecutive hh_size failures — ending this sweep", transient)
+                break
+            continue
         except Exception:
-            LOG.warning("Survey dashboard: hh_size fetch failed for %s — stopping this sweep", row.interview_id, exc_info=True)
-            break
+            transient += 1
+            LOG.warning("Survey dashboard: hh_size fetch failed for %s", row.interview_id, exc_info=True)
+            if transient >= max_transient:
+                LOG.warning("Survey dashboard: %s consecutive hh_size failures — ending this sweep", transient)
+                break
+            continue
+        transient = 0
         row.hh_size = value
         row.hh_size_fetched_at = timezone.now()
         row.save(update_fields=["hh_size", "hh_size_fetched_at", "updated_at"])
@@ -1369,6 +1423,11 @@ def compute_metrics(questionnaire_id: Optional[str] = None, *, days: int = 30) -
         "householdSizeAverage": household_metric.get("average"),
         "householdSizeInterviews": household_metric.get("count"),
         "householdSizeVariable": household_metric.get("variable"),
+        "householdSizePending": household_metric.get("pending"),
+        "householdSizeNoAnswer": household_metric.get("noAnswer"),
+        "householdSizeInScope": household_metric.get("inScope"),
+        "householdSizeCoverage": household_metric.get("coverage"),
+        "householdSizeSource": household_metric.get("source"),
         "activeEnumerators": len(active_enums),
         "targetTotal": target_total,
         "sampleSize": sample_size,

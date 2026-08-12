@@ -591,6 +591,11 @@ class SurveyDashboardMetricsGQLType(graphene.ObjectType):
     household_size_average = graphene.Float()
     household_size_interviews = graphene.Int()
     household_size_variable = graphene.String()
+    household_size_pending = graphene.Int()
+    household_size_no_answer = graphene.Int()
+    household_size_in_scope = graphene.Int()
+    household_size_coverage = graphene.Float()
+    household_size_source = graphene.String()
     active_enumerators = graphene.Int()
     target_total = graphene.Int()
     sample_size = graphene.Int()
@@ -644,6 +649,11 @@ def resolve_survey_dashboard(info, **kwargs):
         household_size_average=m.get("householdSizeAverage"),
         household_size_interviews=m.get("householdSizeInterviews"),
         household_size_variable=m.get("householdSizeVariable"),
+        household_size_pending=m.get("householdSizePending"),
+        household_size_no_answer=m.get("householdSizeNoAnswer"),
+        household_size_in_scope=m.get("householdSizeInScope"),
+        household_size_coverage=m.get("householdSizeCoverage"),
+        household_size_source=m.get("householdSizeSource"),
         active_enumerators=m["activeEnumerators"],
         target_total=m["targetTotal"],
         sample_size=m.get("sampleSize", 0),

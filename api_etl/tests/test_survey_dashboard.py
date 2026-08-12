@@ -3,6 +3,7 @@ from __future__ import annotations
 from unittest.mock import patch, MagicMock
 
 from django.test import SimpleTestCase
+from requests import HTTPError
 
 from api_etl.services import survey_dashboard_service as svc
 from api_etl.services import hq_client
@@ -167,3 +168,97 @@ class CapabilityProbeTests(SimpleTestCase):
             counts = hq_client.graphql_status_counts([], ["Completed", "Restarted"])
         self.assertEqual(counts, {"Completed": 3, "Restarted": 4})
         self.assertEqual(mock_post.call_count, 1)
+
+
+class _FakeRow:
+    def __init__(self, interview_id):
+        self.interview_id = interview_id
+        self.hh_size = None
+        self.hh_size_fetched_at = None
+        self.saves = 0
+
+    def save(self, update_fields=None):
+        self.saves += 1
+
+
+def _http_error(status):
+    response = MagicMock()
+    response.status_code = status
+    return HTTPError(response=response)
+
+
+def _run_harvest(rows, side_effect, budget=10):
+    qs = MagicMock()
+    qs.filter.return_value = qs
+    qs.order_by.return_value = rows
+    with patch.object(svc, "_qs", return_value=qs), \
+         patch.object(svc, "_invalidate_household_metric"), \
+         patch.object(svc, "_fetch_interview_hh_size", side_effect=side_effect):
+        return svc._harvest_hh_sizes(budget=budget)
+
+
+class HouseholdMetricScopeTests(SimpleTestCase):
+    def test_statistics_scope_matches_the_local_aggregate_scope(self):
+        # The two rungs of the source ladder must measure the same population,
+        # otherwise the members total shifts when /statistics starts working.
+        self.assertEqual(set(svc._STATS_SCOPE_STATUSES), set(svc.COMPLETED_OR_BEYOND))
+
+    def test_sent_to_capi_is_in_scope(self):
+        self.assertIn(svc.S_SENT_TO_CAPI, svc._STATS_SCOPE_STATUSES)
+
+
+class HouseholdMetricBucketsTests(SimpleTestCase):
+    def _metric(self, total, n, no_answer, pending):
+        qs = MagicMock()
+        qs.filter.return_value = qs
+        qs.aggregate.return_value = {"total": total, "n": n, "no_answer": no_answer, "pending": pending}
+        with patch.object(svc, "_qs", return_value=qs):
+            return svc._household_metric_from_cache(None)
+
+    def test_buckets_partition_the_scope_and_report_coverage(self):
+        m = self._metric(total=40.0, n=8, no_answer=2, pending=10)
+        self.assertEqual(m["total"], 40)
+        self.assertEqual(m["average"], 5.0)
+        self.assertEqual(m["count"], 8)
+        self.assertEqual(m["noAnswer"], 2)
+        self.assertEqual(m["pending"], 10)
+        self.assertEqual(m["inScope"], 20)
+        self.assertEqual(m["coverage"], 50.0)
+
+    def test_fully_harvested_scope_reports_complete_coverage(self):
+        m = self._metric(total=30.0, n=6, no_answer=4, pending=0)
+        self.assertEqual(m["coverage"], 100.0)
+        self.assertEqual(m["inScope"], 10)
+
+    def test_nothing_harvested_yet_is_not_reported_as_zero_members(self):
+        m = self._metric(total=None, n=0, no_answer=0, pending=560)
+        self.assertIsNone(m["total"])
+        self.assertIsNone(m["count"])
+        self.assertEqual(m["pending"], 560)
+        self.assertEqual(m["coverage"], 0.0)
+
+
+class HarvestFailureTests(SimpleTestCase):
+    def test_missing_interview_is_stamped_so_it_leaves_the_queue(self):
+        rows = [_FakeRow("a"), _FakeRow("b"), _FakeRow("c")]
+        done = _run_harvest(rows, side_effect=[_http_error(404), 5.0, 6.0])
+        # the 404 row must be stamped, otherwise it blocks every older row forever
+        self.assertIsNotNone(rows[0].hh_size_fetched_at)
+        self.assertIsNone(rows[0].hh_size)
+        self.assertEqual(rows[1].hh_size, 5.0)
+        self.assertEqual(rows[2].hh_size, 6.0)
+        self.assertEqual(done, 3)
+
+    def test_one_transient_failure_does_not_end_the_sweep(self):
+        rows = [_FakeRow("a"), _FakeRow("b"), _FakeRow("c")]
+        done = _run_harvest(rows, side_effect=[RuntimeError("boom"), 4.0, 5.0])
+        self.assertIsNone(rows[0].hh_size_fetched_at)   # left pending for a retry
+        self.assertEqual(rows[1].hh_size, 4.0)
+        self.assertEqual(done, 2)
+
+    def test_sweep_stops_after_repeated_transient_failures(self):
+        rows = [_FakeRow(str(i)) for i in range(10)]
+        done = _run_harvest(rows, side_effect=RuntimeError("hq down"))
+        self.assertEqual(done, 0)
+        self.assertTrue(all(r.hh_size_fetched_at is None for r in rows))
+        self.assertTrue(all(r.saves == 0 for r in rows))
