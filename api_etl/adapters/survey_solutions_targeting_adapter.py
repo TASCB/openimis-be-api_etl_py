@@ -150,13 +150,9 @@ class SurveySolutionsTargetingAdapter(DataAdapter):
         # --- Location Name from DB ---
         location_name_val = None
         if loc_code_str:
-            try:
-                from location.models import Location
-                loc = Location.objects.filter(code=loc_code_str).first()
-                if loc:
-                    location_name_val = loc.name
-            except Exception:
-                pass
+            from api_etl.location_cache import location_name_for_code
+
+            location_name_val = location_name_for_code(loc_code_str)
 
         # --- Group Code ---
         ik = self._get(record, "interview__key", "Interview__Key", "interview_key")

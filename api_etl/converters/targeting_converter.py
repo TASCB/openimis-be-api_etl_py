@@ -302,13 +302,9 @@ class TargetingConverter(BaseConverter):
 
         # Try to resolve name from database if missing/numeric
         if (not loc_name or str(loc_name).isdigit()) and loc_code_str:
-            try:
-                from location.models import Location
-                loc_obj = Location.objects.filter(code=loc_code_str).first()
-                if loc_obj:
-                    loc_name = loc_obj.name
-            except Exception:
-                pass
+            from api_etl.location_cache import location_name_for_code
+
+            loc_name = location_name_for_code(loc_code_str) or loc_name
 
         return loc_code_str or None, loc_name
 

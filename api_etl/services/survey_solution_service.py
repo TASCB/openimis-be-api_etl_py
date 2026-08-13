@@ -14,6 +14,7 @@ from api_etl.workflows.pmt import enrich_rows_with_pmt
 
 from api_etl.services.base import ETLService as _BaseService
 from api_etl.apps import ApiEtlConfig as C
+from api_etl.location_cache import clear_location_cache
 from api_etl.paa_aliases import (
     district_suffixes_conflict,
     get_paa_alias_candidates,
@@ -798,6 +799,7 @@ class SurveySolutionService(_BaseService):
     ) -> Dict[str, Any]:
         cfg = self.config
         run_started = time.monotonic()
+        clear_location_cache()
         # A shared Source would otherwise accumulate across runs.
         try:
             self.source._phase_timings = None
