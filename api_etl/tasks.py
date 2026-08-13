@@ -15,6 +15,7 @@ from api_etl.paa_aliases import (
     get_paa_scope,
 )
 from api_etl.utils import ETL_CLASS, get_class_by_name, get_classes_in_module
+from core.signals import register_service_signal
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,43 @@ def _save_history(history: PulledHistory, user=None, update_fields=None):
         history.save(update_fields=update_fields)
 
 
+class ApiEtlService:
+    """Carries the service signals api_etl publishes. A class, not a bare function: the core
+    decorator takes args[0] as the signal sender, and receivers read the actor off it."""
+
+    def __init__(self, user=None):
+        self.user = user
+
+    @register_service_signal("api_etl_service.import_finished")
+    def import_finished(self, *, history_id, status, paa_name="", counts=None):
+        """Terminal state of a PAA ETL run. api_etl does nothing with it; listeners bind
+        AFTER. Passed by keyword so receivers read data[1]."""
+        return {
+            "history_id": history_id,
+            "status": status,
+            "paa_name": paa_name,
+            "counts": counts or {},
+        }
+
+
+def _emit_finished(history: PulledHistory, user=None):
+    """Announce a terminal PulledHistory state. Never raises: no listener may break an import."""
+    try:
+        ApiEtlService(user=user or getattr(history, "user_initiated", None)).import_finished(
+            history_id=str(history.id),
+            status=history.status,
+            paa_name=history.paa_name or "",
+            counts={
+                "individuals": history.n_individuals_inserted,
+                "households": history.number_of_households,
+            },
+        )
+    except Exception:
+        logger.warning(
+            "api_etl: import_finished signal failed for history=%s", history.id, exc_info=True
+        )
+
+
 def _mark_failed(history: PulledHistory, message: str, user=None):
     history.status = "failed"
     history.error_message = message
@@ -52,6 +90,7 @@ def _mark_failed(history: PulledHistory, message: str, user=None):
         }
     )
     _save_history(history, user=user, update_fields=["status", "error_message", "json_ext"])
+    _emit_finished(history, user=user)
 
 
 def _validate_questionnaire_for_paa(
@@ -279,6 +318,7 @@ def execute_paa_etl_history(history_id: str, user_id: str, params: Dict[str, Any
             questionnaire_id,
             history.number_of_households,
         )
+        _emit_finished(history, user=user)
         return {"success": True, "history_id": str(history.id)}
 
     except Exception as exc:
@@ -295,6 +335,7 @@ def execute_paa_etl_history(history_id: str, user_id: str, params: Dict[str, Any
         history.status = "failed"
         history.error_message = str(exc)
         _save_history(history, user=user, update_fields=["status", "error_message", "json_ext"])
+        _emit_finished(history, user=user)
         return {"success": False, "history_id": str(history.id), "message": str(exc)}
 
     finally:
