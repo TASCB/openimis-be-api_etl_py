@@ -55,6 +55,7 @@ from typing import Any, Dict, List, Optional
 import logging
 
 from individual.models import Individual
+from individual.relationship_roles import role_for_relationship
 from api_etl.converters.base import BaseConverter
 from api_etl.utils import to_date_str  # Utility from existing api_etl
 
@@ -344,21 +345,13 @@ class TargetingConverter(BaseConverter):
         gender: Optional[str]
     ) -> tuple[Optional[str], Optional[str]]:
         """
-        Map TZ relationship-to-head codes to openIMIS roles.
+        Resolve the relationship-to-head code to an openIMIS role.
+
+        The code table itself lives in individual.relationship_roles so every
+        ingestion path shares one definition.
 
         Returns:
             (role_label, role_code) tuple
-
-        TZ Codes:
-        1 = HEAD
-        2 = SPOUSE
-        3 = SON/DAUGHTER
-        4 = STEPCHILD
-        5 = SIBLING
-        6 = GRANDCHILD
-        7 = PARENT
-        12 = CO-WIFE
-        etc.
         """
         rth_field = config.get("adapter_relationship_to_head_field", "RTH")
         rth_code = str(cls._get(record, rth_field, "RELATIONSHIPTOHEAD", "relationship_to_head") or "").strip()
@@ -366,52 +359,7 @@ class TargetingConverter(BaseConverter):
         if not rth_code:
             return None, None
 
-        # Map to role label
-        g = (gender or "").upper()
-        role_label = None
-
-        if rth_code == "1":
-            role_label = "HEAD"
-        elif rth_code == "2":
-            role_label = "SPOUSE"
-        elif rth_code in ("3", "4"):  # Son/Daughter/Stepchild
-            if g == "M":
-                role_label = "SON"
-            elif g == "F":
-                role_label = "DAUGHTER"
-            else:
-                role_label = "OTHER RELATIVE"
-        elif rth_code == "5":  # Sibling
-            if g == "M":
-                role_label = "BROTHER"
-            elif g == "F":
-                role_label = "SISTER"
-            else:
-                role_label = "OTHER RELATIVE"
-        elif rth_code == "6":  # Grandchild
-            if g == "M":
-                role_label = "GRANDSON"
-            elif g == "F":
-                role_label = "GRANDDAUGHTER"
-            else:
-                role_label = "OTHER RELATIVE"
-        elif rth_code == "7":  # Parent
-            if g == "M":
-                role_label = "FATHER"
-            elif g == "F":
-                role_label = "MOTHER"
-            else:
-                role_label = "OTHER RELATIVE"
-        elif rth_code == "12":  # Co-wife
-            role_label = "SPOUSE"
-        elif rth_code in ("8", "10", "11", "13"):
-            role_label = "OTHER RELATIVE"
-        elif rth_code == "14":
-            role_label = "NOT RELATED"
-        else:
-            role_label = "OTHER RELATIVE"
-
-        return role_label, rth_code
+        return role_for_relationship(rth_code, gender), rth_code
 
     @classmethod
     def _get_household_representative(

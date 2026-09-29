@@ -10,36 +10,25 @@ DEFAULT_CONFIG = {
     "auth_bearer_token": "",
     # --- Export API (Survey Solutions HQ) ---
     "source_mode": "export_api",
-    "export_base_url": "",  # e.g. http://192.xxx.x.15:9700 or http://192.xxx.x.15:9700/workspace
+    "export_base_url": "",
     "export_api_prefix": "/api/v2",
     "export_format": "Tabular",
     "export_interview_status": "All",
     "export_include_meta": False,
-    "export_tab_name_contains": "",  # e.g. "individual_test"
+    "export_tab_name_contains": "",
     "export_tmp_dir": "/tmp/ss_exports",
     "export_poll_interval_seconds": 3,
     "export_timeout_seconds": 3600,
     "export_reuse_latest_on_5xx": True,
     "export_keep_zip": False,
-    # Best-effort cleanup of kept export ZIPs in export_tmp_dir: on each download,
-    # remove ZIPs older than this many hours (runs in the worker that owns the
-    # folder; /tmp/ss_exports is per-container, not a shared volume). 0 disables.
     "export_tmp_retention_hours": 48,
-    # --- PAA ETL execution ---
-    # When enabled, GraphQL returns immediately and Celery/RabbitMQ runs the import.
     "paa_etl_async_enabled": True,
-    # Keep local/dev usable if the broker is unavailable.
     "paa_etl_fallback_to_sync_on_queue_error": True,
-    # Prevent duplicate imports for the same district while a previous one is running.
     "paa_etl_prevent_duplicate_active": True,
-    # Optional Celery queue name. Empty string uses the worker default queue.
     "paa_etl_task_queue": "",
-    # Mark imports still running after this many hours as failed when history is read
-    # or before duplicate-running checks are applied. Counts already saved remain visible.
     "paa_etl_running_timeout_hours": 12,
-    # --- Questionnaire default(s) ---
-    "questionnaire_id": "",  # single
-    "export_questionnaire_ids": [],  # or multiple
+    "questionnaire_id": "",
+    "export_questionnaire_ids": [],
     # --- Questionnaire matching configuration ---
     "questionnaire_title_prefix": "DODOSO LA KAYA - RM4-",
     "questionnaire_title_prefixes": [
@@ -169,19 +158,10 @@ DEFAULT_CONFIG = {
     # --- Derived/household grouping (used by adapter logic) ---
     "group_code_prefix": "P3",
     "group_code_midfix": "000",
-    # --- Sink (import into openIMIS Individuals) ---
-    # Upsert by json_ext.external_id (stable interview key)
     "sink_model_lookup_field": "json_ext__external_id",
     "sink_update_existing": True,
-    # Workflow handler to run after upload (short name or dotted class)
     "sink_workflow": "api_etl.workflows.targeting.TargetingWorkflow",
-    # Grouping column for bulk importer (fallback handled in sink)
     "sink_group_aggregation_column": "location_code",
-    # CSV columns passed to bulk importer.
-    # Includes group_code, individual_role, individual_role_code, and hhrep so
-    # the role/recipient mapping at group-link time can see them in
-    # Individual.Json_ext, plus external_id + json_ext for idempotency +
-    # no-loss payload.
     "sink_csv_fields": [
         "first_name",
         "last_name",
@@ -212,17 +192,12 @@ DEFAULT_CONFIG = {
     "dashboard_poll_interval_seconds": 60,
     # Page size when paging the HQ /api/v1/interviews endpoint.
     "dashboard_interview_page_size": 200,
-    # Safety cap so a runaway HQ doesn't blow up memory.
     "dashboard_max_interviews": 50000,
-    # Planned target total for the cumulative completion (S-curve) chart; 0 = auto.
     "dashboard_target_total": 0,
     # An enumerator counts as "active" if they synced within this many hours.
     "dashboard_active_window_hours": 24,
     # Number of recent interview cards to show in the live feed.
     "dashboard_feed_size": 50,
-    # Headline KPIs come from cheap per-status TotalCount queries; the live feed /
-    # leaderboard / heatmap come from a *bounded sample* of interview briefs (HQ
-    # offers no recency sort, so we sample a few pages per "interesting" status).
     "dashboard_sample_size": 350,
     # Cap on cached rows scanned in Python when building the leaderboard/heatmap.
     "dashboard_metrics_row_cap": 5000,
@@ -248,7 +223,6 @@ DEFAULT_CONFIG = {
     "dashboard_hq_connect_timeout": 5,
     "dashboard_hq_read_timeout": 60,
     # After a failed poll, wait this long before the dashboard self-heal re-polls
-    # (keeps an unreachable HQ from stalling every page load on the connect timeout).
     "dashboard_poll_fail_backoff_seconds": 300,
     # --- GraphQL perms ---
     "gql_query_api_etl_rule_perms": ["953001"],
@@ -266,8 +240,6 @@ class ApiEtlConfig(AppConfig):
 
     # Keep a copy of merged config here
     config = DEFAULT_CONFIG.copy()
-
-    # Convenience: computed endpoint base (export_base_url + export_api_prefix)
     export_endpoint_base = None
 
     @classmethod

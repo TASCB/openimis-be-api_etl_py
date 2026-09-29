@@ -32,7 +32,7 @@ class SurveySolutionsTargetingAdapterTest(TestCase):
             "VILLAGE_CODE": "70405101",        # 8 digits -> zfill(9) => "070405101"
             "WARD_CODE": "704051",             # present but unused if village exists
             "TF4_NO": "23",
-            "RELATIONSHIPTOHEAD": "5",         # maps to BROTHER/SISTER depending on gender
+            "RELATIONSHIPTOHEAD": "5",         # grandchild: GRANDSON/GRANDDAUGHTER by sex
             "HHREP": "1",
             "interview__key": "93-84-46-41",
         }
@@ -91,25 +91,29 @@ class SurveySolutionsTargetingAdapterTest(TestCase):
         record = self._build_record()
         result = self.adapter.transform(record)
 
-        # RELATIONSHIPTOHEAD = "5", SEX = "2" (F) → "SISTER"
+        # RELATIONSHIPTOHEAD = "5", SEX = "F" → "GRANDDAUGHTER"
         self.assertEqual(result["individual_role_code"], "5")
-        self.assertEqual(result["individual_role"], "SISTER")
+        self.assertEqual(result["individual_role"], "GRANDDAUGHTER")
         self.assertEqual(result["hhrep"], "1")
 
     def test_role_mapping_covers_non_head_household_members(self):
         cases = [
             ({"RELATIONSHIPTOHEAD": "3", "SEX": "M"}, "SON"),
             ({"RELATIONSHIPTOHEAD": "3", "SEX": "F"}, "DAUGHTER"),
-            ({"RELATIONSHIPTOHEAD": "4", "SEX": "M"}, "SON"),
-            ({"RELATIONSHIPTOHEAD": "4", "SEX": "F"}, "DAUGHTER"),
-            ({"RELATIONSHIPTOHEAD": "5", "SEX": "M"}, "BROTHER"),
-            ({"RELATIONSHIPTOHEAD": "5", "SEX": "F"}, "SISTER"),
-            ({"RELATIONSHIPTOHEAD": "6", "SEX": "M"}, "GRANDSON"),
-            ({"RELATIONSHIPTOHEAD": "6", "SEX": "F"}, "GRANDDAUGHTER"),
-            ({"RELATIONSHIPTOHEAD": "7", "SEX": "M"}, "FATHER"),
-            ({"RELATIONSHIPTOHEAD": "7", "SEX": "F"}, "MOTHER"),
-            ({"RELATIONSHIPTOHEAD": "12", "SEX": "F"}, "SPOUSE"),
-            ({"RELATIONSHIPTOHEAD": "14", "SEX": "F"}, "NOT RELATED"),
+            ({"RELATIONSHIPTOHEAD": "4", "SEX": "M"}, "SON IN LAW"),
+            ({"RELATIONSHIPTOHEAD": "4", "SEX": "F"}, "DAUGHTER IN LAW"),
+            ({"RELATIONSHIPTOHEAD": "5", "SEX": "M"}, "GRANDSON"),
+            ({"RELATIONSHIPTOHEAD": "5", "SEX": "F"}, "GRANDDAUGHTER"),
+            ({"RELATIONSHIPTOHEAD": "6", "SEX": "M"}, "FATHER"),
+            ({"RELATIONSHIPTOHEAD": "6", "SEX": "F"}, "MOTHER"),
+            ({"RELATIONSHIPTOHEAD": "7", "SEX": "M"}, "FATHER IN LAW"),
+            ({"RELATIONSHIPTOHEAD": "7", "SEX": "F"}, "MOTHER IN LAW"),
+            ({"RELATIONSHIPTOHEAD": "8", "SEX": "M"}, "BROTHER"),
+            ({"RELATIONSHIPTOHEAD": "8", "SEX": "F"}, "SISTER"),
+            ({"RELATIONSHIPTOHEAD": "10", "SEX": "F"}, "STEP CHILD"),
+            ({"RELATIONSHIPTOHEAD": "11", "SEX": "F"}, "CO-WIFE"),
+            ({"RELATIONSHIPTOHEAD": "12", "SEX": "F"}, "SISTER IN LAW"),
+            ({"RELATIONSHIPTOHEAD": "13", "SEX": "F"}, "HOUSE HELP"),
             ({"RELATIONSHIPTOHEAD": "99", "SEX": "F"}, "OTHER RELATIVE"),
         ]
 
@@ -119,7 +123,7 @@ class SurveySolutionsTargetingAdapterTest(TestCase):
                 self.assertEqual(result["individual_role"], expected_role)
 
     def test_role_mapping_falls_back_to_other_relative_when_gender_missing(self):
-        cases = ["3", "4", "5", "6", "7"]
+        cases = ["3", "4", "5", "6", "7", "8", "12"]
 
         for relationship_code in cases:
             with self.subTest(relationship_code=relationship_code):
@@ -138,9 +142,9 @@ class SurveySolutionsTargetingAdapterTest(TestCase):
         cases = [
             ({"RELATIONSHIPTOHEAD": "3", "SEX": "1"}, "M", "SON"),
             ({"RELATIONSHIPTOHEAD": "3", "SEX": "2"}, "F", "DAUGHTER"),
-            ({"RELATIONSHIPTOHEAD": "5", "SEX": "1"}, "M", "BROTHER"),
-            ({"RELATIONSHIPTOHEAD": "6", "SEX": "2"}, "F", "GRANDDAUGHTER"),
-            ({"RELATIONSHIPTOHEAD": "7", "SEX": "1"}, "M", "FATHER"),
+            ({"RELATIONSHIPTOHEAD": "5", "SEX": "1"}, "M", "GRANDSON"),
+            ({"RELATIONSHIPTOHEAD": "6", "SEX": "2"}, "F", "MOTHER"),
+            ({"RELATIONSHIPTOHEAD": "8", "SEX": "1"}, "M", "BROTHER"),
         ]
         for overrides, expected_gender, expected_role in cases:
             with self.subTest(overrides=overrides):

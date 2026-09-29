@@ -3,6 +3,7 @@ from typing import Any, Dict, Optional
 
 from api_etl.adapters.base import DataAdapter
 from api_etl.utils import to_date_str
+from individual.relationship_roles import role_for_relationship
 
 
 class SurveySolutionsTargetingAdapter(DataAdapter):
@@ -49,16 +50,7 @@ class SurveySolutionsTargetingAdapter(DataAdapter):
         return "01"
 
     def _normalize_gender(self, raw: Any) -> Optional[str]:
-        """
-        Resolve a source sex/gender value to canonical "M"/"F".
-
-        Survey Solutions sends sex as a numeric code ("1"/"2"), so we apply the
-        configurable adapter_gender_map (default {"1": "M", "2": "F"}) BEFORE the
-        M/F check. Without this, numeric codes are discarded and every
-        gender-dependent household role (SON/DAUGHTER, BROTHER/SISTER, etc.)
-        collapses to "OTHER RELATIVE", and json_ext.gender is never stored.
-        Full words ("MALE"/"FEMALE") are tolerated as a fallback.
-        """
+        # Resolve a source sex/gender value to canonical "M"/"F".
         s = str(raw or "").strip()
         if not s:
             return None
@@ -72,28 +64,7 @@ class SurveySolutionsTargetingAdapter(DataAdapter):
         return mapped if mapped in ("M", "F") else None
 
     def _map_role(self, rth: Optional[str], gender: Optional[str]) -> Optional[str]:
-        c = str(rth or "").strip()
-        g = str(gender or "").strip().upper()
-
-        if not c:
-            return None
-        if c == "1":
-            return "HEAD"
-        if c == "2":
-            return "SPOUSE"
-        if c in ("3", "4"):
-            return "SON" if g == "M" else "DAUGHTER" if g == "F" else "OTHER RELATIVE"
-        if c == "5":
-            return "BROTHER" if g == "M" else "SISTER" if g == "F" else "OTHER RELATIVE"
-        if c == "6":
-            return "GRANDSON" if g == "M" else "GRANDDAUGHTER" if g == "F" else "OTHER RELATIVE"
-        if c == "7":
-            return "FATHER" if g == "M" else "MOTHER" if g == "F" else "OTHER RELATIVE"
-        if c == "12":
-            return "SPOUSE"
-        if c == "14":
-            return "NOT RELATED"
-        return "OTHER RELATIVE"
+        return role_for_relationship(rth, gender)
 
     @staticmethod
     def _title_case(name: Optional[str]) -> Optional[str]:
@@ -133,8 +104,6 @@ class SurveySolutionsTargetingAdapter(DataAdapter):
         # --- DOB / Gender ---
         dob_norm = to_date_str(self._get(record, "dob", "DATEOFBIRTH"))
         g_raw = self._get(record, "sex", "gender", "SEX")
-        # Apply adapter_gender_map (e.g. SS sex codes "1"->"M", "2"->"F") so that
-        # gender is available to _map_role below; see _normalize_gender.
         gender_norm = self._normalize_gender(g_raw)
 
         # --- Location Code ---
@@ -195,7 +164,6 @@ class SurveySolutionsTargetingAdapter(DataAdapter):
             "hhrep": hhrep_val,
         }
 
-        # Store ALL questionnaire variables under raw, but keep targeting keys at top-level
         json_ext: Dict[str, Any] = {
             "pmt_score": None,
             "pmt_class": None,
@@ -208,8 +176,6 @@ class SurveySolutionsTargetingAdapter(DataAdapter):
             json_ext["record_type"] = str(record_type)
         if pssn_wave is not None and str(pssn_wave).strip() != "":
             json_ext["pssn_wave"] = str(pssn_wave)
-        # Promote normalized gender ("M"/"F") to top-level json_ext so it can be
-        # indexed in OpenSearch (individual.gender) and filtered in GraphQL.
         if gender_norm:
             json_ext["gender"] = gender_norm
 
