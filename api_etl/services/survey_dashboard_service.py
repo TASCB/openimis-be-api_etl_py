@@ -1436,11 +1436,34 @@ def compute_metrics(questionnaire_id: Optional[str] = None, *, days: int = 30) -
         "questionnaires": questionnaire_options,
         "dailyProductivity": daily_productivity,
         "completionSeries": completion_series,
+        "statusHistory": status_history(questionnaire_id),
         "approvalFunnel": approval_funnel,
         "enumeratorLeaderboard": leaderboard,
         "supervisorLeaderboard": supervisor_leaderboard,
         "activityHeatmap": heatmap,
     }
+
+
+def status_history(questionnaire_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    guid, _v = _split_qid(questionnaire_id)
+    rows = SurveyDashboardSnapshot.objects.filter(questionnaire_id=(guid or "")).order_by("snapshot_date").values(
+        "snapshot_date", "in_progress", "completed", "approved_by_supervisor", "sent_to_capital",
+        "approved_by_hq", "rejected_by_supervisor", "rejected_by_hq", "cumulative_completed",
+    )
+    return [
+        {
+            "date": r["snapshot_date"].isoformat(),
+            "inProgress": r["in_progress"],
+            "completed": r["completed"],
+            "approvedBySupervisor": r["approved_by_supervisor"],
+            "sentToCapi": r["sent_to_capital"],
+            "approvedByHq": r["approved_by_hq"],
+            "rejectedBySupervisor": r["rejected_by_supervisor"],
+            "rejectedByHq": r["rejected_by_hq"],
+            "cumulativeCompleted": r["cumulative_completed"],
+        }
+        for r in rows
+    ]
 
 
 def list_interviews(

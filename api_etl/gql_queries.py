@@ -523,6 +523,18 @@ class SurveyDailyCountGQLType(graphene.ObjectType):
     cumulative = graphene.Int()
 
 
+class SurveyStatusSnapshotGQLType(graphene.ObjectType):
+    date = graphene.String()
+    in_progress = graphene.Int()
+    completed = graphene.Int()
+    approved_by_supervisor = graphene.Int()
+    sent_to_capi = graphene.Int()
+    approved_by_hq = graphene.Int()
+    rejected_by_supervisor = graphene.Int()
+    rejected_by_hq = graphene.Int()
+    cumulative_completed = graphene.Int()
+
+
 class SurveyFunnelStageGQLType(graphene.ObjectType):
     stage = graphene.String()
     count = graphene.Int()
@@ -615,6 +627,7 @@ class SurveyDashboardMetricsGQLType(graphene.ObjectType):
     questionnaires = graphene.List(SurveyQuestionnaireOptionGQLType)
     daily_productivity = graphene.List(SurveyDailyCountGQLType)
     completion_series = graphene.List(SurveyDailyCountGQLType)
+    status_history = graphene.List(SurveyStatusSnapshotGQLType)
     approval_funnel = graphene.List(SurveyFunnelStageGQLType)
     enumerator_leaderboard = graphene.List(SurveyEnumeratorStatGQLType)
     supervisor_leaderboard = graphene.List(SurveySupervisorStatGQLType)
@@ -679,6 +692,20 @@ def resolve_survey_dashboard(info, **kwargs):
         ],
         daily_productivity=[SurveyDailyCountGQLType(**d) for d in m["dailyProductivity"]],
         completion_series=[SurveyDailyCountGQLType(**d) for d in m["completionSeries"]],
+        status_history=[
+            SurveyStatusSnapshotGQLType(
+                date=d["date"],
+                in_progress=d["inProgress"],
+                completed=d["completed"],
+                approved_by_supervisor=d["approvedBySupervisor"],
+                sent_to_capi=d["sentToCapi"],
+                approved_by_hq=d["approvedByHq"],
+                rejected_by_supervisor=d["rejectedBySupervisor"],
+                rejected_by_hq=d["rejectedByHq"],
+                cumulative_completed=d["cumulativeCompleted"],
+            )
+            for d in m.get("statusHistory", [])
+        ],
         approval_funnel=[SurveyFunnelStageGQLType(**d) for d in m["approvalFunnel"]],
         enumerator_leaderboard=[
             SurveyEnumeratorStatGQLType(
