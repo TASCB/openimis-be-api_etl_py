@@ -65,7 +65,7 @@ class Query(graphene.ObjectType):
     survey_interviews = graphene.List(
         SurveyInterviewGQLType,
         questionnaire_id=graphene.String(),
-        status=graphene.String(),
+        status=graphene.String(description="One status, or several comma-separated"),
         responsible_name=graphene.String(),
         supervisor_name=graphene.String(),
         search=graphene.String(),

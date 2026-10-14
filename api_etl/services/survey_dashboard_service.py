@@ -1456,7 +1456,8 @@ def list_interviews(
     from django.db.models import Q
     qs = _qs(questionnaire_id)
     if status:
-        qs = qs.filter(status=status)
+        statuses = [x.strip() for x in str(status).split(",") if x.strip()]
+        qs = qs.filter(status__in=statuses)
     if responsible_name:
         qs = qs.filter(responsible_name__icontains=responsible_name)
     if supervisor_name:
