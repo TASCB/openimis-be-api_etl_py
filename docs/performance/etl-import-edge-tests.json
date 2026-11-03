@@ -1,0 +1,6 @@
+{
+  "only_approved_rows_imported": true,
+  "invalid_approved_rows_held_back": true,
+  "prior_upload_members_locations_aligned": true,
+  "location_and_group_changes_have_history": true
+}

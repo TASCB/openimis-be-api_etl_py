@@ -122,6 +122,7 @@ class IndividualImportSink(DataSink):
         self.config: Dict[str, Any] = config or C.__dict__
 
         self.svc = IndividualImportService(user=user)
+        self.phase_timings = {}
 
         if batch and hasattr(self.svc, "batch"):
             try:
@@ -203,6 +204,11 @@ class IndividualImportSink(DataSink):
         rec.pop("Json_ext", None)
         return rec
 
+    def import_context(self):
+        from individual.import_performance import optimized_import
+        self.phase_timings = {}
+        return optimized_import(self.svc, self.phase_timings)
+
     def _get_data_id(self, data: Dict[str, Any], key: str) -> Any:
         if not data or not key:
             return None
@@ -216,7 +222,7 @@ class IndividualImportSink(DataSink):
                     jx = {}
             if not isinstance(jx, dict):
                 jx = {}
-            return jx.get(parts[-1])
+            return jx.get(parts[-1], data.get(parts[-1]))
         return data.get(parts[-1])
 
     def _get_existing_individual_ids(self, data_ids: List[Any], model_lookup_field: str) -> Dict[Any, int]:
@@ -224,7 +230,7 @@ class IndividualImportSink(DataSink):
         if not clean_ids:
             return {}
         filter_kwargs = {f"{model_lookup_field}__in": clean_ids}
-        queryset = Individual.objects.filter(**filter_kwargs)
+        queryset = Individual.objects.filter(is_deleted=False, **filter_kwargs)
         results = queryset.values_list(model_lookup_field, "id")
         return dict(results) if results else {}
 
