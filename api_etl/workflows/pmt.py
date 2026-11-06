@@ -149,6 +149,54 @@ def classify_pmt(
     return "POOR" if s <= float(cut) else "NON_POOR"
 
 
+def survey_answers(source: Dict[str, Any]) -> Dict[str, Any]:
+    raw = source.get("raw")
+    if isinstance(raw, dict):
+        return raw
+    nested = source.get("json_ext")
+    if isinstance(nested, str):
+        try:
+            nested = json.loads(nested)
+        except Exception:
+            nested = None
+    if isinstance(nested, dict) and isinstance(nested.get("raw"), dict):
+        return nested["raw"]
+    return {}
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def household_pmt_inputs(source: Dict[str, Any], members_count: int | None = None) -> Dict[str, Any]:
+    source = source or {}
+    raw = survey_answers(source)
+
+    size = _int_or_none(source.get("household_size")) or members_count
+    if not size:
+        size = _int_or_none(raw.get(getattr(C, "pmt_household_size_field", "hh_size"))) or 0
+
+    assets = source.get("assets_owned") or raw.get("assets_owned")
+    if not assets:
+        prefix = getattr(C, "pmt_asset_field_prefix", "hh_asset__")
+        assets = [
+            key[len(prefix):] for key, value in raw.items()
+            if key.startswith(prefix) and _int_or_none(value) == 1
+        ]
+
+    settlement = source.get("settlement_type") or raw.get("settlement_type")
+    if not settlement:
+        location = raw.get(getattr(C, "pmt_location_field", "hh_location"))
+        if location not in (None, ""):
+            urban_values = {str(v).strip() for v in getattr(C, "pmt_urban_location_values", ["1"]) or []}
+            settlement = "urban" if str(location).strip() in urban_values else "rural"
+
+    return {"household_size": size, "assets_owned": assets, "settlement_type": settlement or "rural"}
+
+
 def compute_household_pmt_score(
     hh: Dict[str, Any],
     members: List[Dict[str, Any]],
@@ -164,9 +212,10 @@ def compute_household_pmt_score(
     if coeffs is None:
         coeffs = get_active_coeffs()
 
-    hsize = int(hh.get("household_size") or 0)
-    assets = hh.get("assets_owned") or []
-    urban = 1 if (str(hh.get("settlement_type") or "").strip().lower() == "urban") else 0
+    inputs = household_pmt_inputs(hh, members_count=len(members or []))
+    hsize = inputs["household_size"]
+    assets = inputs["assets_owned"]
+    urban = 1 if str(inputs["settlement_type"]).strip().lower() == "urban" else 0
 
     n_15_64 = 0
     for m in members or []:

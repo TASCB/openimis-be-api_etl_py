@@ -19,9 +19,7 @@ from workflow.services import WorkflowService
 LOG = logging.getLogger(__name__)
 
 # Hard exclude these keys from being picked up as CSV columns by the generic
-# field sniffer. gender is here too: it only becomes a CSV column via the
-# explicit PROMOTED_JSON_EXT_FIELDS path below, i.e. only when an adapter put a
-# normalized value under json_ext["gender"] (the SS targeting adapter does).
+# field sniffer.
 # pmt_cutoff_used is PMT metadata that the PMT workflow emits top-level (mirroring
 # pmt_score/pmt_class) but, unlike those, it is not a recognized BenefitPlan column,
 # so the individual import workflow rejects it ("invalid columns: {'pmt_cutoff_used'}").
@@ -31,12 +29,6 @@ LOG = logging.getLogger(__name__)
 # REQUIRES it. So "ID" is never auto-included; the update path opts it back in
 # explicitly via _effective_csv_fields(..., include_id=True).
 CSV_FIELD_DENYLIST = {"raw", "_source", "phone", "email", "gender", "pmt_cutoff_used", "ID"}
-
-# These are stored inside the adapter json_ext payload, but the individual
-# import workflow also needs them as normal CSV columns so they land flat in
-# Individual.json_ext (used by the consent_res index and the OpenSearch
-# individual.gender mapping).
-PROMOTED_JSON_EXT_FIELDS = ("consent_res", "record_type", "pssn_wave", "gender")
 
 DEFAULT_DOB_SENTINEL = "1900-07-01"
 
@@ -288,13 +280,6 @@ class IndividualImportSink(DataSink):
         if "json_ext" not in fields:
             fields.append("json_ext")
 
-        for field in PROMOTED_JSON_EXT_FIELDS:
-            if field not in fields and any(
-                isinstance(o.get("json_ext"), dict) and o["json_ext"].get(field) not in (None, "")
-                for o in objs
-            ):
-                fields.append(field)
-
         # The update workflow needs the "ID" column to match the existing Individual;
         # the upload workflow rejects it. Only the update path passes include_id=True.
         if include_id and "ID" not in fields:
@@ -332,11 +317,6 @@ class IndividualImportSink(DataSink):
                 return ""
 
             v = row.get(field)
-            if v in (None, "") and field in PROMOTED_JSON_EXT_FIELDS:
-                jx = row.get("json_ext")
-                if isinstance(jx, dict):
-                    v = jx.get(field)
-
             if v is None:
                 return ""
 

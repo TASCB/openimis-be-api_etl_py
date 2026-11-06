@@ -224,6 +224,11 @@ DEFAULT_CONFIG = {
     "dashboard_hq_read_timeout": 60,
     # After a failed poll, wait this long before the dashboard self-heal re-polls
     "dashboard_poll_fail_backoff_seconds": 300,
+    # --- PMT inputs from the survey answers ---
+    "pmt_household_size_field": "hh_size",
+    "pmt_asset_field_prefix": "hh_asset__",
+    "pmt_location_field": "hh_location",
+    "pmt_urban_location_values": ["1"],
     # --- GraphQL perms ---
     "gql_query_api_etl_rule_perms": ["953001"],
     "gql_mutation_execute_api_etl_rule_perms": ["953002"],
