@@ -728,6 +728,14 @@ class SurveySolutionService(_BaseService):
                     )
                 continue
 
+            unique_persons = self._unique_persons(persons)
+            if len(unique_persons) < len(persons):
+                LOG.warning(
+                    "Roster merge: interview_key=%s had %s repeated person row(s); kept %s",
+                    ik, len(persons) - len(unique_persons), len(unique_persons),
+                )
+            persons = unique_persons
+
             relationship_counts: Dict[str, int] = {}
             for p in persons:
                 rel_code = self._relationship_to_head_code(p)
@@ -741,6 +749,35 @@ class SurveySolutionService(_BaseService):
             len(merged),
         )
         return merged
+
+    @staticmethod
+    def _questionnaire_version(row: Dict[str, Any]) -> Tuple[int, str]:
+        source = row.get("_source")
+        qid = str(source.get("questionnaire_id") or "") if isinstance(source, dict) else ""
+        version = qid.rsplit("$", 1)[-1] if "$" in qid else ""
+        return (int(version) if version.isdigit() else -1, qid)
+
+    @classmethod
+    def _unique_persons(cls, persons: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        latest = max((cls._questionnaire_version(p) for p in persons), default=None)
+        unique, seen = [], set()
+        for p in persons:
+            if cls._questionnaire_version(p) != latest:
+                continue
+            source = p.get("_source") if isinstance(p.get("_source"), dict) else {}
+            roster_ids = tuple(sorted(
+                (k, str(v)) for k, v in p.items()
+                if str(k).lower().endswith("__id") and str(k).lower() not in ("interview__id", "assignment__id")
+            ))
+            content = roster_ids or tuple(sorted(
+                (str(k), str(v)) for k, v in p.items() if k != "_source" and not isinstance(v, (dict, list))
+            ))
+            key = (source.get("tab_name"), content)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(p)
+        return unique
 
     def build_preview_payload(self, records, source_name=None):
         """Return a UI-safe preview (scalars only) to avoid React errors on dict/list values."""

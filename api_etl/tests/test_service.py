@@ -108,6 +108,33 @@ class SurveySolutionServiceTests(unittest.TestCase):
 
         self.assertEqual([row["_member_ordinal"] for row in merged], ["01", "01", "02"])
 
+    def _merge(self, rows):
+        svc = SurveySolutionService(user=None, source=_FakeSource(), sink=None, config={})
+        return svc._merge_household_roster(rows)
+
+    def test_merge_drops_a_repeated_roster_row(self):
+        tab = {"questionnaire_id": "Q$2", "tab_name": "hh_members"}
+        head = {"interview__key": "K", "hh_members__id": "1", "firstname": "Head", "RELATIONSHIPTOHEAD": "1", "_source": tab}
+        son = {"interview__key": "K", "hh_members__id": "2", "firstname": "Son", "RELATIONSHIPTOHEAD": "3", "_source": tab}
+        merged = self._merge([head, son, dict(son), dict(head)])
+        self.assertEqual([(r["firstname"], r["_member_ordinal"]) for r in merged], [("Head", "01"), ("Son", "01")])
+
+    def test_merge_keeps_only_the_latest_questionnaire_version_of_an_interview(self):
+        old = {"questionnaire_id": "Q$3", "tab_name": "hh_members"}
+        new = {"questionnaire_id": "Q$10", "tab_name": "hh_members"}
+        merged = self._merge([
+            {"interview__key": "K", "hh_members__id": "1", "firstname": "Old head", "RELATIONSHIPTOHEAD": "1", "_source": old},
+            {"interview__key": "K", "hh_members__id": "1", "firstname": "Head", "RELATIONSHIPTOHEAD": "1", "_source": new},
+            {"interview__key": "K", "hh_members__id": "2", "firstname": "Son", "RELATIONSHIPTOHEAD": "3", "_source": new},
+        ])
+        self.assertEqual([r["firstname"] for r in merged], ["Head", "Son"])
+
+    def test_merge_without_roster_ids_drops_only_identical_rows(self):
+        a = {"interview__key": "K", "firstname": "A", "RELATIONSHIPTOHEAD": "3"}
+        b = {"interview__key": "K", "firstname": "B", "RELATIONSHIPTOHEAD": "3"}
+        merged = self._merge([a, dict(a), b])
+        self.assertEqual([(r["firstname"], r["_member_ordinal"]) for r in merged], [("A", "01"), ("B", "02")])
+
     def test_questionnaire_match_uses_zanzibar_paa_aliases(self):
         q_pemba = {"Title": "DODOSO LA KAYA - RM4-PEMBA", "Version": 1}
         q_unguja = {"Title": "DODOSO LA KAYA - RM4-UNGUJA", "Version": 1}
