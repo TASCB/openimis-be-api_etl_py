@@ -1,5 +1,13 @@
 # openIMIS Backend api_etl reference module
 
+## Survey Solutions ZIP imports
+
+Survey Solutions imports use the optimized ZIP export workflow exclusively.
+The legacy `source_mode` input accepts only `export_api`; direct API retrieval
+is no longer supported. Household batching and database import optimizations
+remain enabled. Optional PMT enrichment runs before loading when
+`enrich_pmt_default` or the run's `enrich_pmt` flag is enabled.
+
 # API ETL Configuration and Adapter Extension Guide
 
 ## Default Configuration Example
@@ -57,3 +65,8 @@ class MyCustomAdapter(BaseAdapter):
 ```
 
 This modular architecture allows easy customization and extension to support different data sources and APIs.
+
+## Import performance and database setup
+
+See [the deployment and optimization README](docs/performance/README.md) for the
+paired module branch, required migrations/indexes, deployment, rollback, and results.

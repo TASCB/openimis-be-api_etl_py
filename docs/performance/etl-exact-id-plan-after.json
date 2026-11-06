@@ -1,0 +1,14 @@
+{
+  "execution_ms": 54.991,
+  "plan": {
+    "Node Type": "Index Scan",
+    "Relation Name": "individual_individual",
+    "Index Name": "idx_individual_external_id_exact",
+    "Actual Rows": 1999,
+    "Actual Loops": 1,
+    "Actual Total Time": 54.925,
+    "Shared Hit Blocks": 14071,
+    "Shared Read Blocks": 667,
+    "Plan Rows": 47938
+  }
+}

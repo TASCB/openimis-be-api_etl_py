@@ -8,6 +8,7 @@ from typing import Any, Dict, Iterable, List, Optional, DefaultDict, Tuple
 from collections import defaultdict
 
 from django.db import transaction
+from api_etl.batching import household_batches
 
 # PMT enrichment
 from api_etl.workflows.pmt import enrich_rows_with_pmt
@@ -401,7 +402,7 @@ class SurveySolutionService(_BaseService):
         adapter=None,
         sink=None,
         config: Optional[Dict[str, Any]] = None,
-        batch_size: int = 200,
+        batch_size: Optional[int] = None,
     ):
         # prefer explicit user kwarg
         user = user if user is not None else self_user
@@ -412,13 +413,15 @@ class SurveySolutionService(_BaseService):
             k: v for k, v in C.__dict__.items() if not str(k).startswith("_")
         }
         self.config: Dict[str, Any] = {**base_config, **(config or {})}
-        self.source = source or Source()
+        if self.config.get("source_mode", "export_api") != "export_api":
+            raise ValueError("Only ZIP export (source_mode=export_api) is supported")
+        self.source = source if source is not None else Source()
         self.adapter = adapter or Adapter(config=self.config)
-        self.batch_size = max(1, int(batch_size))
+        self.batch_size = max(1, int(batch_size if batch_size is not None else self.config.get("sink_batch_size", 2000)))
 
         self.sink = sink
         if self.sink is None and user is not None and Sink is not None:
-            self.sink = Sink(user)
+            self.sink = Sink(user, config=self.config)
 
         LOG.info(
             "SurveySolutionService initialized with adapter=%s, sink=%s, batch_size=%s",
@@ -519,6 +522,7 @@ class SurveySolutionService(_BaseService):
             value = source_timings.pop(key, None)
             timings[key] = value.isoformat() if value is not None else None
         timings.update(source_timings)
+        timings.update(getattr(self.sink, "phase_timings", {}) or {})
 
         hq_seconds = sum(
             float(timings.get(k, 0.0) or 0.0)
@@ -1018,16 +1022,12 @@ class SurveySolutionService(_BaseService):
         load_seconds = 0.0
         if self.sink and not dry_run and transformed:
             load_started = time.monotonic()
-            with transaction.atomic():
-                if self.batch_size <= 1:
-                    self.sink.push(transformed, batch_identifier=batch_id)
-                    total_pushed = len(transformed)
-                else:
-                    for i in range(0, len(transformed), self.batch_size):
-                        self.sink.push(
-                            transformed[i : i + self.batch_size], batch_identifier=batch_id
-                        )
-                        total_pushed += len(transformed[i : i + self.batch_size])
+            from contextlib import nullcontext
+            context = self.sink.import_context() if hasattr(self.sink, "import_context") else nullcontext()
+            with transaction.atomic(), context:
+                for batch in household_batches(transformed, self.batch_size):
+                    self.sink.push(batch, batch_identifier=batch_id)
+                    total_pushed += len(batch)
             load_seconds = round(time.monotonic() - load_started, 3)
 
         timings = self._collect_timings(
@@ -1040,6 +1040,7 @@ class SurveySolutionService(_BaseService):
         )
 
         summary = {
+            "source_mode": cfg.get("source_mode", "export_api"),
             "questionnaires": qids,
             "tab_filter": effective_tab or "",
             "dry_run": dry_run or (self.sink is None),

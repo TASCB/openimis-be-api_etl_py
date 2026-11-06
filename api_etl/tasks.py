@@ -216,6 +216,10 @@ def execute_paa_etl_history(history_id: str, user_id: str, params: Dict[str, Any
             "dry_run": dry_run,
             "batch_id": batch_id,
         }
+        if params.get("source_mode") is not None:
+            if params["source_mode"] != "export_api":
+                raise ValueError("Only ZIP export (source_mode=export_api) is supported")
+            service_config["source_mode"] = params["source_mode"]
         etl_service = etl_service_class(user, config=service_config)
 
         match_info = {}

@@ -41,6 +41,10 @@ class _RecordingSink:
 
 
 class SurveySolutionServiceTests(unittest.TestCase):
+    def test_direct_mode_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "Only ZIP export"):
+            SurveySolutionService(config={"source_mode": "direct_api"})
+
     def test_runtime_config_overlays_module_defaults(self):
         svc = SurveySolutionService(
             user=None,

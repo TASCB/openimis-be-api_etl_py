@@ -1,0 +1,37 @@
+{
+  "execution_ms": 5359.345,
+  "plan": {
+    "Node Type": "Gather",
+    "Actual Rows": 1999,
+    "Actual Loops": 1,
+    "Actual Total Time": 5359.248,
+    "Shared Hit Blocks": 185680,
+    "Shared Read Blocks": 14315,
+    "Plan Rows": 47938,
+    "Plans": [
+      {
+        "Node Type": "Bitmap Heap Scan",
+        "Relation Name": "individual_individual",
+        "Actual Rows": 1000,
+        "Actual Loops": 2,
+        "Actual Total Time": 5341.452,
+        "Shared Hit Blocks": 185680,
+        "Shared Read Blocks": 14315,
+        "Rows Removed by Filter": 22841,
+        "Plan Rows": 28199,
+        "Plans": [
+          {
+            "Node Type": "Bitmap Index Scan",
+            "Index Name": "idx_individual_external_id_norm",
+            "Actual Rows": 47681,
+            "Actual Loops": 1,
+            "Actual Total Time": 7.499,
+            "Shared Hit Blocks": 0,
+            "Shared Read Blocks": 384,
+            "Plan Rows": 47940
+          }
+        ]
+      }
+    ]
+  }
+}

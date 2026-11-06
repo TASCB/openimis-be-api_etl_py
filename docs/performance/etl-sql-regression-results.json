@@ -1,0 +1,18 @@
+{
+  "full": {
+    "uuid_mapping": true,
+    "invalid_rows_held_back": true,
+    "duplicates_link_existing": true,
+    "payload_preserved": true,
+    "approved_subset_respected": true,
+    "status": "PARTIAL_SUCCESS"
+  },
+  "partial": {
+    "uuid_mapping": true,
+    "invalid_rows_held_back": true,
+    "duplicates_link_existing": true,
+    "payload_preserved": true,
+    "approved_subset_respected": true,
+    "status": "PENDING"
+  }
+}

@@ -161,7 +161,8 @@ DEFAULT_CONFIG = {
     "sink_model_lookup_field": "json_ext__external_id",
     "sink_update_existing": True,
     "sink_workflow": "api_etl.workflows.targeting.TargetingWorkflow",
-    "sink_group_aggregation_column": "location_code",
+    "sink_group_aggregation_column": "group_code",
+    "sink_batch_size": 2000,
     "sink_csv_fields": [
         "first_name",
         "last_name",

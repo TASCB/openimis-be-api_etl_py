@@ -30,6 +30,7 @@ class ETLServiceMutation(BaseMutation):
 
     class Input(OpenIMISMutation.Input):
         name_of_service = graphene.String(required=True)
+        source_mode = graphene.String(required=False)
 
     @classmethod
     def _validate_mutation(cls, user, **data):
@@ -58,7 +59,15 @@ class ETLServiceMutation(BaseMutation):
 
             etl_service_class = get_class_by_name(ETL_CLASS, name_of_service)
             # Instantiate and execute the ETL service (bridge method on the service)
-            etl_service = etl_service_class(user)
+            source_mode = data.get("source_mode") or data.get("sourceMode")
+            if source_mode is not None:
+                if source_mode != "export_api":
+                    raise ValidationError("Only ZIP export (source_mode=export_api) is supported")
+                if name_of_service != "SurveySolutionService":
+                    raise ValidationError("Source mode applies only to Survey Solutions")
+                etl_service = etl_service_class(user, config={"source_mode": source_mode})
+            else:
+                etl_service = etl_service_class(user)
             result = etl_service.execute()
 
             if result.get("success"):
@@ -93,6 +102,7 @@ class PAABasedETLMutation(BaseMutation):
         district_code = graphene.String(required=False)
         region_code = graphene.String(required=False)
         questionnaire_id = graphene.String(required=False)
+        source_mode = graphene.String(required=False)
         dry_run = graphene.Boolean(required=False, default_value=False)
 
     @classmethod
@@ -112,6 +122,10 @@ class PAABasedETLMutation(BaseMutation):
             data.pop("client_mutation_label", None)
 
             paa_name = data.get("paa_name") or data.get("paaName")
+            source_mode = data.get("source_mode") or data.get("sourceMode")
+            if source_mode is not None and source_mode != "export_api":
+                raise ValidationError("Only ZIP export (source_mode=export_api) is supported")
+            source_mode = source_mode or "export_api"
             district_code = data.get("district_code") or data.get("districtCode")
             region_code = data.get("region_code") or data.get("regionCode")
             paa_scope = get_paa_scope(name=paa_name, code=district_code, config=ApiEtlConfig)
@@ -171,6 +185,7 @@ class PAABasedETLMutation(BaseMutation):
                         else "sync"
                     ),
                     "task_status": "queued",
+                    "source_mode": source_mode,
                     "batch_id": batch_id,
                 },
             )
@@ -180,6 +195,7 @@ class PAABasedETLMutation(BaseMutation):
                 "district_code": district_code,
                 "region_code": region_code,
                 "matching_paa_name": matching_paa_name,
+                "source_mode": source_mode,
                 "questionnaire_id": questionnaire_id,
                 "dry_run": dry_run,
                 "batch_id": batch_id,

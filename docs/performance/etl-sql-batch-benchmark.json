@@ -1,0 +1,14 @@
+[
+  {
+    "variant": "wide_candidates",
+    "seconds": 22.684,
+    "rows": 1999,
+    "status": "SUCCESS"
+  },
+  {
+    "variant": "lean_candidates",
+    "seconds": 1.383,
+    "rows": 1999,
+    "status": "SUCCESS"
+  }
+]
