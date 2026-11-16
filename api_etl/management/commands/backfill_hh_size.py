@@ -18,10 +18,12 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         questionnaire = options["questionnaire"]
+        first = True
         while True:
             result = backfill_hh_size(
-                questionnaire, budget=options["budget"], throttle=options["throttle"]
+                questionnaire, budget=options["budget"], throttle=options["throttle"], sync_briefs=first,
             )
+            first = False
             self.stdout.write(str(result))
             if result.get("skipped"):
                 return

@@ -356,6 +356,9 @@ class SurveyInterviewCache(models.Model):
     hh_size = models.FloatField(blank=True, null=True)
     hh_size_fetched_at = models.DateTimeField(blank=True, null=True)
 
+    # Feed / leaderboard sort key: last entry, else HQ update, else when we saw it.
+    activity_at = models.DateTimeField(blank=True, null=True)
+
     json_ext = models.JSONField(db_column="Json_ext", blank=True, default=dict)
 
     class Meta:
@@ -367,6 +370,8 @@ class SurveyInterviewCache(models.Model):
             models.Index(fields=["responsible_name"], name="api_etl_sic_resp_idx"),
             models.Index(fields=["status_changed_at"], name="api_etl_sic_changed_idx"),
             models.Index(fields=["last_entry_at_utc"], name="api_etl_sic_lastentry_idx"),
+            models.Index(fields=["-activity_at"], name="api_etl_sic_activity_idx"),
+            models.Index(fields=["questionnaire_id", "-activity_at"], name="api_etl_sic_qid_activity_idx"),
         ]
 
     def __str__(self):

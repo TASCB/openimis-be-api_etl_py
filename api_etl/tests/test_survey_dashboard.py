@@ -9,14 +9,6 @@ from api_etl.services import survey_dashboard_service as svc
 from api_etl.services import hq_client
 
 
-def _resp(json_payload, status=200):
-    m = MagicMock()
-    m.status_code = status
-    m.json.return_value = json_payload
-    m.raise_for_status.return_value = None
-    return m
-
-
 class SplitQidTests(SimpleTestCase):
     def test_identity_with_version(self):
         self.assertEqual(svc._split_qid("11aea4ff-9bbe-48e7-96d5-7f1413305fcf$3"),
@@ -29,7 +21,21 @@ class SplitQidTests(SimpleTestCase):
     def test_dashed_guid_roundtrip(self):
         plain = "11aea4ff9bbe48e796d57f1413305fcf"
         self.assertEqual(svc._dashed_guid(plain), "11aea4ff-9bbe-48e7-96d5-7f1413305fcf")
-        self.assertEqual(svc._dashed_guid("short"), "short")
+        with self.assertRaises(svc.InvalidQuestionnaireId):
+            svc._dashed_guid("short")
+
+    def test_injection_is_rejected(self):
+        # the value is pasted into HQ GraphQL query text
+        for bad in ['x"}}) { nodes { id } } #', "11aea4ff9bbe48e796d57f1413305fcf$1 or 1", "zz" * 16,
+                    "11aea4ff9bbe48e796d57f1413305fcf$abc"]:
+            with self.assertRaises(svc.InvalidQuestionnaireId):
+                svc._split_qid(bad)
+
+    def test_validate_returns_canonical_identity(self):
+        self.assertEqual(svc.validate_questionnaire_id("11aea4ff-9bbe-48e7-96d5-7f1413305fcf$3"),
+                         "11aea4ff9bbe48e796d57f1413305fcf$3")
+        self.assertIsNone(svc.validate_questionnaire_id(""))
+        self.assertIsNone(svc.validate_questionnaire_id(None))
 
 
 class StatusVocabularyTests(SimpleTestCase):
@@ -52,14 +58,13 @@ class StatusVocabularyTests(SimpleTestCase):
 
 
 class InterviewsRequestParamsTests(SimpleTestCase):
-    @patch.object(svc, "requests")
-    def test_total_count_uses_pagesize_page(self, mock_requests):
-        mock_requests.get.return_value = _resp({"Interviews": [], "TotalCount": 42})
-        with patch.object(hq_client, "endpoint_base", return_value="http://hq/ws/api/v1"), \
-             patch.object(hq_client, "request_kwargs", return_value={}):
-            total = svc.fetch_total_count("11aea4ff9bbe48e796d57f1413305fcf$1", status="Completed")
+    @patch.object(hq_client, "json_get")
+    def test_total_count_uses_pagesize_page(self, mock_get):
+        mock_get.return_value = {"Interviews": [], "TotalCount": 42}
+        total = svc.fetch_total_count("11aea4ff9bbe48e796d57f1413305fcf$1", status="Completed")
         self.assertEqual(total, 42)
-        params = mock_requests.get.call_args.kwargs.get("params") or {}
+        self.assertEqual(mock_get.call_args.args[0], "interviews")
+        params = mock_get.call_args.kwargs.get("params") or {}
         self.assertEqual(params.get("pageSize"), 1)
         self.assertEqual(params.get("page"), 1)
         self.assertNotIn("limit", params)
@@ -95,6 +100,19 @@ class NumericReportParserTests(SimpleTestCase):
         self.assertIsNone(svc._parse_numeric_report(None))
         self.assertIsNone(svc._parse_numeric_report({"data": [["Team", "only-labels"]]}))
 
+    def test_total_row_object_with_string_values(self):
+        # HQ 22.02.5 shape (measured 2026-11-16, Chamwino DC)
+        payload = {
+            "data": [{"TeamLead": "rm4_Chamwino_Dc", "Responsible": "0", "count": "31231",
+                      "average": "4.236", "sum": "132303"}],
+            "totalRow": {"TeamLead": "All teams", "Responsible": "All interviewers", "count": "31231",
+                         "average": "4.236", "median": "4", "sum": "132303", "total": "0"},
+        }
+        self.assertEqual(svc._parse_numeric_report(payload), {"total": 132303, "average": 4.2, "count": 31231})
+
+    def test_total_row_with_no_answers(self):
+        self.assertIsNone(svc._parse_numeric_report({"data": [], "totalRow": {"count": "0", "sum": "0"}}))
+
     def test_dict_rows_other_builds(self):
         payload = {"data": [{"TeamLead": "A", "count": 4, "sum": 20}]}
         m = svc._parse_numeric_report(payload)
@@ -102,7 +120,7 @@ class NumericReportParserTests(SimpleTestCase):
 
 
 class StatisticsRequestParamsTests(SimpleTestCase):
-    @patch.object(svc, "_hq_json_get")
+    @patch.object(hq_client, "json_get")
     def test_version_and_statuses_sent(self, mock_get):
         mock_get.return_value = {"data": [["T", 4, 5.0, 5, 20, 1, 1, 5, 9, 9]]}
         m = svc._fetch_statistics_metric("11aea4ff9bbe48e796d57f1413305fcf$2", "hh_size")
@@ -115,6 +133,28 @@ class StatisticsRequestParamsTests(SimpleTestCase):
         self.assertEqual(params["QuestionnaireId"], "11aea4ff9bbe48e796d57f1413305fcf")
         self.assertIn("Completed", params["statuses[]"])
         self.assertIn("ApprovedBySupervisor", params["statuses[]"])
+        # HQ answers 500 without the DataTables paging params
+        self.assertEqual(params["start"], 0)
+        self.assertEqual(params["length"], 1)
+        self.assertNotIn("PageSize", params)
+        self.assertNotIn("PageIndex", params)
+
+
+class AllPaaHouseholdTests(SimpleTestCase):
+    def test_sum_over_questionnaires(self):
+        stats = {"total": 100, "count": 25, "pending": 0, "noAnswer": 0, "inScope": 25, "source": "statistics"}
+        stats2 = {"total": 50, "count": 10, "pending": 0, "noAnswer": 0, "inScope": 10, "source": "statistics"}
+        m = svc._combine_household_metrics([stats, stats2])
+        self.assertEqual((m["total"], m["count"], m["average"]), (150, 35, 4.3))
+        self.assertEqual(m["source"], "statistics")
+        self.assertEqual(m["coverage"], 100.0)
+
+    def test_a_harvested_questionnaire_marks_the_total_mixed(self):
+        stats = {"total": 100, "count": 25, "pending": 0, "inScope": 25, "source": "statistics"}
+        harvested = {"total": 8, "count": 2, "pending": 8, "inScope": 10, "source": "live-harvest"}
+        m = svc._combine_household_metrics([stats, harvested])
+        self.assertEqual(m["source"], "mixed")
+        self.assertEqual(m["coverage"], round(27 / 35 * 100, 1))
 
 
 class GraphqlNodeMappingTests(SimpleTestCase):

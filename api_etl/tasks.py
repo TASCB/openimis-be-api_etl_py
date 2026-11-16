@@ -358,29 +358,30 @@ def run_paa_etl_task(self, history_id: str, user_id: str, params: Dict[str, Any]
 
 
 @shared_task(name="api_etl.poll_survey_dashboard")
-def poll_survey_dashboard_task(questionnaire_id: Optional[str] = None, with_sample: bool = True):
-    """Poll Survey Solutions HQ for the monitoring dashboard and refresh the cache."""
-    from api_etl.services.survey_dashboard_service import refresh_dashboard
+def poll_survey_dashboard_task(questionnaire_id: Optional[str] = None, with_sample: bool = True,
+                               lock_key: Optional[str] = None):
+    """Poll Survey Solutions HQ for the monitoring dashboard and refresh the cache;
+    releases lock_key (Sync now / self-heal) when done."""
+    from api_etl.services.survey_dashboard_service import run_refresh
 
-    try:
-        return refresh_dashboard(questionnaire_id=questionnaire_id, with_sample=with_sample)
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Survey dashboard poll task failed: %s", exc)
-        return {"error": str(exc)}
+    return run_refresh(questionnaire_id, with_sample, lock_key)
 
 
 @shared_task(name="api_etl.backfill_hh_size")
-def backfill_hh_size_task(questionnaire_id: Optional[str] = None, budget: Optional[int] = None):
-    """One bounded backfill pass; re-enqueues itself until the scope is covered."""
+def backfill_hh_size_task(questionnaire_id: Optional[str] = None, budget: Optional[int] = None,
+                          sync_briefs: bool = True):
+    """One bounded backfill pass; re-enqueues itself (without re-syncing briefs)
+    until the scope is covered."""
     from api_etl.services.survey_dashboard_service import backfill_hh_size
 
     try:
-        result = backfill_hh_size(questionnaire_id, budget=budget)
+        result = backfill_hh_size(questionnaire_id, budget=budget, sync_briefs=sync_briefs)
     except Exception as exc:  # noqa: BLE001
         logger.exception("Survey dashboard hh_size backfill failed: %s", exc)
         return {"error": str(exc)}
-    if (result or {}).get("remaining"):
-        backfill_hh_size_task.apply_async(args=[questionnaire_id, budget], countdown=30)
+    if (result or {}).get("remaining") and not backfill_hh_size_task.app.conf.task_always_eager:
+        # eager mode would recurse inside the caller; use the management command instead
+        backfill_hh_size_task.apply_async(args=[questionnaire_id, budget, False], countdown=30)
     return result
 
 

@@ -1,3 +1,4 @@
+import logging
 import re
 from datetime import datetime
 
@@ -15,6 +16,8 @@ from api_etl.paa_aliases import (
     split_district_token,
 )
 from .models import PulledHistory
+
+logger = logging.getLogger(__name__)
 
 
 # -----------------------------------------------------------------------------
@@ -624,9 +627,10 @@ class SurveyDashboardMetricsGQLType(graphene.ObjectType):
     sample_size = graphene.Int()
     hq_base_url = graphene.String()
     last_polled_at = graphene.String()
+    last_failed_at = graphene.String()
+    sync_running = graphene.Boolean()
     questionnaires = graphene.List(SurveyQuestionnaireOptionGQLType)
     daily_productivity = graphene.List(SurveyDailyCountGQLType)
-    completion_series = graphene.List(SurveyDailyCountGQLType)
     status_history = graphene.List(SurveyStatusSnapshotGQLType)
     approval_funnel = graphene.List(SurveyFunnelStageGQLType)
     enumerator_leaderboard = graphene.List(SurveyEnumeratorStatGQLType)
@@ -646,13 +650,13 @@ def _iso(value):
 def resolve_survey_dashboard(info, **kwargs):
     from api_etl.services import survey_dashboard_service as svc
 
-    questionnaire_id = kwargs.get("questionnaire_id") or kwargs.get("questionnaireId")
+    questionnaire_id = svc.validate_questionnaire_id(kwargs.get("questionnaire_id") or kwargs.get("questionnaireId"))
 
     # Self-heal: if the cache is stale, kick off a (non-blocking) poll.
     try:
         svc.maybe_async_refresh(questionnaire_id=questionnaire_id)
     except Exception:  # noqa: BLE001
-        pass
+        logger.warning("Survey dashboard: self-heal could not be queued", exc_info=True)
 
     m = svc.compute_metrics(questionnaire_id=questionnaire_id)
     return SurveyDashboardMetricsGQLType(
@@ -683,6 +687,8 @@ def resolve_survey_dashboard(info, **kwargs):
         sample_size=m.get("sampleSize", 0),
         hq_base_url=m.get("hqBaseUrl") or "",
         last_polled_at=m["lastPolledAt"],
+        last_failed_at=m.get("lastFailedAt"),
+        sync_running=svc.sync_running(questionnaire_id),
         questionnaires=[
             SurveyQuestionnaireOptionGQLType(
                 identity=q.get("identity"), id=q.get("id"), version=q.get("version"),
@@ -691,7 +697,6 @@ def resolve_survey_dashboard(info, **kwargs):
             for q in m.get("questionnaires", [])
         ],
         daily_productivity=[SurveyDailyCountGQLType(**d) for d in m["dailyProductivity"]],
-        completion_series=[SurveyDailyCountGQLType(**d) for d in m["completionSeries"]],
         status_history=[
             SurveyStatusSnapshotGQLType(
                 date=d["date"],
@@ -744,7 +749,7 @@ def resolve_survey_dashboard(info, **kwargs):
 def resolve_survey_interviews(info, **kwargs):
     from api_etl.services import survey_dashboard_service as svc
 
-    questionnaire_id = kwargs.get("questionnaire_id") or kwargs.get("questionnaireId")
+    questionnaire_id = svc.validate_questionnaire_id(kwargs.get("questionnaire_id") or kwargs.get("questionnaireId"))
     status = kwargs.get("status")
     responsible_name = kwargs.get("responsible_name") or kwargs.get("responsibleName")
     supervisor_name = kwargs.get("supervisor_name") or kwargs.get("supervisorName")

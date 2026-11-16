@@ -277,15 +277,17 @@ class PAABasedETLMutation(BaseMutation):
 
 class RefreshSurveyDashboardMutation(graphene.Mutation):
     """
-    Force an immediate poll of the Survey Solutions HQ ``/api/v1/interviews``
-    endpoint and refresh the monitoring-dashboard cache. Returns the poll
-    summary so the frontend can show "synced N interviews".
+    "Sync now": queue a full poll of Survey Solutions HQ on the worker and return
+    at once (the poll takes minutes; running it in the request timed out at nginx).
+    The page refetches until ``lastPolledAt`` moves.
     """
 
     class Arguments:
         questionnaire_id = graphene.String(required=False)
 
     success = graphene.Boolean()
+    queued = graphene.Boolean()
+    already_running = graphene.Boolean()
     seen = graphene.Int()
     created = graphene.Int()
     changed = graphene.Int()
@@ -302,21 +304,17 @@ class RefreshSurveyDashboardMutation(graphene.Mutation):
             or not user.has_perms(ApiEtlConfig.gql_mutation_execute_api_etl_rule_perms)
         ):
             raise PermissionError("Unauthorized")
-        try:
-            from api_etl.services.survey_dashboard_service import refresh_dashboard
+        from api_etl.services import survey_dashboard_service as svc
 
-            result = refresh_dashboard(questionnaire_id=questionnaire_id)
-            return cls(
-                success=True,
-                seen=result.get("seen", 0),
-                created=result.get("created", 0),
-                changed=result.get("changed", 0),
-                total_count=result.get("total_count"),
-                polled_at=result.get("polled_at"),
-                message="ok",
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Failed to refresh survey dashboard")
-            return cls(
-                success=False, seen=0, created=0, changed=0, total_count=None, polled_at=None, message=str(exc),
-            )
+        try:
+            scope = svc.validate_questionnaire_id(questionnaire_id)
+        except svc.InvalidQuestionnaireId:
+            return cls(success=False, queued=False, already_running=False, message="Unknown questionnaire")
+        try:
+            queued = svc.start_sync(scope)
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to queue the survey dashboard sync")
+            return cls(success=False, queued=False, already_running=False,
+                       message="Could not start the sync with Survey Solutions HQ. Try again later.")
+        return cls(success=True, queued=queued, already_running=not queued,
+                   message="started" if queued else "already running")

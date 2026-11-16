@@ -197,8 +197,7 @@ DEFAULT_CONFIG = {
     "dashboard_target_total": 0,
     # An enumerator counts as "active" if they synced within this many hours.
     "dashboard_active_window_hours": 24,
-    # Number of recent interview cards to show in the live feed.
-    "dashboard_feed_size": 50,
+    # Max interview briefs fetched per poll for the feed / leaderboard sample.
     "dashboard_sample_size": 350,
     # Cap on cached rows scanned in Python when building the leaderboard/heatmap.
     "dashboard_metrics_row_cap": 5000,
@@ -210,7 +209,8 @@ DEFAULT_CONFIG = {
     "dashboard_hhsize_max_consecutive_failures": 5,
     "dashboard_hhsize_backfill_budget": 500,
     "dashboard_hhsize_backfill_throttle": 0.3,
-    "dashboard_hhsize_backfill_auto": True,
+    # Fallback only: /statistics gives household figures (2026-11-16).
+    "dashboard_hhsize_backfill_auto": False,
     "dashboard_graphql_enabled": True,
     "dashboard_cursor_lookback_hours": 24,
     "dashboard_stats_fail_backoff_seconds": 1800,
@@ -225,6 +225,13 @@ DEFAULT_CONFIG = {
     "dashboard_hq_read_timeout": 60,
     # After a failed poll, wait this long before the dashboard self-heal re-polls
     "dashboard_poll_fail_backoff_seconds": 300,
+    # Page-load self-heal queues a full poll (feed, leaderboards, household
+    # figures) when the last one is older than this; 0 = never (cron / Sync only).
+    "dashboard_full_poll_interval_seconds": 300,
+    # "Sync now" lock: one full poll per scope at a time.
+    "dashboard_sync_lock_seconds": 900,
+    # How often the worker rebuilds the "All PAAs" household total from /statistics.
+    "dashboard_hhsize_all_refresh_seconds": 1800,
     # --- PMT inputs from the survey answers ---
     "pmt_household_size_field": "hh_size",
     "pmt_asset_field_prefix": "hh_asset__",
