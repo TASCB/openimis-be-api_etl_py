@@ -15,6 +15,7 @@ from api_etl.paa_aliases import (
     scopes_for_codes,
     split_district_token,
 )
+from .hq_origin import current_hq_url
 from .models import PulledHistory
 
 logger = logging.getLogger(__name__)
@@ -211,7 +212,9 @@ class PulledQuestionnaireConnection(graphene.relay.Connection):
 def resolve_pulled_questionnaires(root, info, **kwargs):
     from api_etl.stale_imports import fail_stale_running_imports
 
-    queryset = PulledHistory.get_queryset(None, info.context.user)
+    queryset = PulledHistory.get_queryset(None, info.context.user).filter(
+        hq_url=current_hq_url(), is_deleted=False
+    )
 
     region_code = kwargs.get("region_code") or kwargs.get("regionCode")
     if region_code:
@@ -237,6 +240,8 @@ def resolve_pulled_questionnaires(root, info, **kwargs):
     ).order_by("status_rank", "-date_pulled", "-id")
 
     if not queryset.exists():
+        if PulledHistory.objects.exists():
+            return []
         return _get_fallback_pulled_questionnaires(region_code, district_code)
 
     items = []

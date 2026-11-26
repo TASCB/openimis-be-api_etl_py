@@ -18,6 +18,7 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime, parse_date
 
 from api_etl.apps import ApiEtlConfig as C
+from api_etl.hq_origin import current_hq_tag, current_hq_url
 from api_etl.models import SurveyInterviewCache, SurveyDashboardSnapshot, PulledHistory
 from api_etl.services import hq_client
 
@@ -836,7 +837,7 @@ def _iso_utc(dt) -> Optional[str]:
 
 
 def _cursor_key(questionnaire_id: Optional[str]) -> str:
-    return f"api_etl:survey_dashboard:cursor:{_scope_key(questionnaire_id) or 'ALL'}"
+    return f"api_etl:survey_dashboard:cursor:{current_hq_tag()}:{_scope_key(questionnaire_id) or 'ALL'}"
 
 
 def _load_cursor(questionnaire_id: Optional[str]) -> Optional[str]:
@@ -939,7 +940,7 @@ def iter_sample_briefs(
 
 # ---- status-count cache (so the GraphQL layer reads them without re-hitting HQ) ----
 def _status_counts_key(questionnaire_id: Optional[str]) -> str:
-    return f"api_etl:survey_dashboard:status_counts:{_scope_key(questionnaire_id) or 'ALL'}"
+    return f"api_etl:survey_dashboard:status_counts:{current_hq_tag()}:{_scope_key(questionnaire_id) or 'ALL'}"
 
 
 def _store_status_counts(questionnaire_id: Optional[str], counts: Dict[str, int]) -> None:
@@ -1044,6 +1045,7 @@ def _upsert_briefs(briefs_iter: Iterable[Dict[str, Any]]) -> Tuple[int, int, int
         if iid:
             briefs_by_id[str(iid).replace("-", "")] = b
     q_titles = _questionnaire_title_map() if briefs_by_id else {}
+    hq_url = current_hq_url()
 
     seen = changed = created_rows = 0
     with transaction.atomic():
@@ -1056,6 +1058,7 @@ def _upsert_briefs(briefs_iter: Iterable[Dict[str, Any]]) -> Tuple[int, int, int
         update_names: Set[str] = set()
         for iid, brief in briefs_by_id.items():
             fields = _brief_to_fields(brief, q_titles)
+            fields["hq_url"] = hq_url
             if fields.get("activity_at") is None:
                 prev = existing.get(iid)
                 fields["activity_at"] = (prev.activity_at if prev else None) or now
@@ -1152,7 +1155,7 @@ def poll_interviews(
 # aggregation
 # --------------------------------------------------------------------------- #
 def _qs(questionnaire_id: Optional[str]):
-    qs = SurveyInterviewCache.objects.exclude(status=S_DELETED)
+    qs = SurveyInterviewCache.objects.filter(hq_url=current_hq_url()).exclude(status=S_DELETED)
     guid, version = _split_qid(questionnaire_id)
     if guid:
         qs = qs.filter(questionnaire_id=guid)
@@ -1209,6 +1212,7 @@ def list_dashboard_questionnaires() -> List[Dict[str, Any]]:
     never raises (a broken row must not take the whole dashboard down).
     """
     by_guid: Dict[str, Dict[str, Any]] = {}
+    hq_url = current_hq_url()
 
     def _merge(guid, version, title, count):
         try:
@@ -1243,7 +1247,8 @@ def list_dashboard_questionnaires() -> List[Dict[str, Any]]:
     # interviews actually in the cache (these have synced samples)
     try:
         for r in (
-            SurveyInterviewCache.objects.exclude(questionnaire_id__isnull=True).exclude(questionnaire_id="")
+            SurveyInterviewCache.objects.filter(hq_url=hq_url)
+            .exclude(questionnaire_id__isnull=True).exclude(questionnaire_id="")
             .values("questionnaire_id", "questionnaire_version", "questionnaire_title")
             .annotate(c=Count("id"))
         ):
@@ -1254,7 +1259,8 @@ def list_dashboard_questionnaires() -> List[Dict[str, Any]]:
     # PAAs that have been imported via the ETL (may not have a synced sample yet)
     try:
         for r in (
-            PulledHistory.objects.exclude(questionnaire_id__isnull=True).exclude(questionnaire_id="")
+            PulledHistory.objects.filter(hq_url=hq_url, is_deleted=False)
+            .exclude(questionnaire_id__isnull=True).exclude(questionnaire_id="")
             .values("questionnaire_id", "questionnaire_version", "questionnaire_title", "paa_name").distinct()
         ):
             _merge(r["questionnaire_id"], r.get("questionnaire_version"), r.get("questionnaire_title") or r.get("paa_name"), 0)
@@ -1280,7 +1286,8 @@ def _snapshots(questionnaire_id: Optional[str]) -> List[SurveyDashboardSnapshot]
     guid, _v = _split_qid(questionnaire_id)
     keys = [key] + ([guid] if guid and guid != key else [])
     by_date: Dict[Any, SurveyDashboardSnapshot] = {}
-    for snap in SurveyDashboardSnapshot.objects.filter(questionnaire_id__in=keys).order_by("snapshot_date"):
+    snaps = SurveyDashboardSnapshot.objects.filter(questionnaire_id__in=keys, hq_url=current_hq_url())
+    for snap in snaps.order_by("snapshot_date"):
         if snap.snapshot_date not in by_date or snap.questionnaire_id == key:
             by_date[snap.snapshot_date] = snap
     return [by_date[d] for d in sorted(by_date)]
@@ -1601,6 +1608,7 @@ def take_daily_snapshot(questionnaire_id: Optional[str] = None, status_counts: O
     SurveyDashboardSnapshot.objects.update_or_create(
         snapshot_date=today,
         questionnaire_id=_scope_key(questionnaire_id),
+        hq_url=current_hq_url(),
         defaults={
             "total_interviews": sum(status_counts.values()),
             "in_progress": sum(g(s) for s in IN_PROGRESS_STATUSES),

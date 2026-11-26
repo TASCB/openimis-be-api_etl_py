@@ -24,6 +24,7 @@ from api_etl.gql_mutations import (
     PAABasedETLMutation,
     RefreshSurveyDashboardMutation,
 )
+from api_etl.hq_origin import current_hq_url
 from api_etl.models import PulledHistory
 from api_etl.utils import get_class_by_name, get_classes_in_module, ETL_CLASS
 
@@ -101,7 +102,7 @@ class Query(graphene.ObjectType):
             wait_for_mutation(client_mutation_id)
             filters.append(Q(mutations__mutation__client_mutation_id=client_mutation_id))
 
-        query = PulledHistory.objects.filter(*filters).order_by("-date_pulled")
+        query = PulledHistory.objects.filter(*filters, hq_url=current_hq_url()).order_by("-date_pulled")
         return gql_optimizer.query(query, info)
 
     def resolve_pulled_questionnaires(self, info, **kwargs):
@@ -112,17 +113,21 @@ class Query(graphene.ObjectType):
         return resolve_pulled_questionnaires(self, info, **kwargs)
 
     def resolve_available_questionnaires(self, info, **kwargs):
-        if not info.context.user.has_perms(ApiEtlConfig.gql_query_api_etl_rule_perms):
+        user = info.context.user
+        if not (
+            user.has_perms(ApiEtlConfig.gql_query_api_etl_rule_perms)
+            or user.has_perms(ApiEtlConfig.gql_query_survey_dashboard_perms)
+        ):
             raise PermissionError("Unauthorized")
         return resolve_available_questionnaires(info, **kwargs)
 
     def resolve_survey_dashboard(self, info, **kwargs):
-        if not info.context.user.has_perms(ApiEtlConfig.gql_query_api_etl_rule_perms):
+        if not info.context.user.has_perms(ApiEtlConfig.gql_query_survey_dashboard_perms):
             raise PermissionError("Unauthorized")
         return resolve_survey_dashboard(info, **kwargs)
 
     def resolve_survey_interviews(self, info, **kwargs):
-        if not info.context.user.has_perms(ApiEtlConfig.gql_query_api_etl_rule_perms):
+        if not info.context.user.has_perms(ApiEtlConfig.gql_query_survey_dashboard_perms):
             raise PermissionError("Unauthorized")
         return resolve_survey_interviews(info, **kwargs)
 

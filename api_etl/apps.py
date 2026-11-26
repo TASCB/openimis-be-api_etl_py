@@ -240,6 +240,7 @@ DEFAULT_CONFIG = {
     # --- GraphQL perms ---
     "gql_query_api_etl_rule_perms": ["953001"],
     "gql_mutation_execute_api_etl_rule_perms": ["953002"],
+    "gql_query_survey_dashboard_perms": ["953101"],
     # --- Misc ---
     "skip_integration_test": False,
 }

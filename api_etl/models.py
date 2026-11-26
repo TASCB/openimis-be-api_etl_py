@@ -156,6 +156,7 @@ class PulledHistory(HistoryModel):
 
     # Additional metadata in JSON format
     json_ext = models.JSONField(db_column="Json_ext", blank=True, default=dict)
+    hq_url = models.CharField(max_length=255, blank=True, default="", db_index=True)
 
     class Meta:
         verbose_name = "Pulled Questionnaire History"
@@ -295,6 +296,9 @@ class PulledHistory(HistoryModel):
             user: User who initiated the run
             **kwargs: Additional fields
         """
+        from api_etl.hq_origin import current_hq_url
+
+        kwargs.setdefault("hq_url", current_hq_url())
         return cls.objects.create(
             paa_name=paa_name,
             district_code=district_code,
@@ -360,6 +364,7 @@ class SurveyInterviewCache(models.Model):
     activity_at = models.DateTimeField(blank=True, null=True)
 
     json_ext = models.JSONField(db_column="Json_ext", blank=True, default=dict)
+    hq_url = models.CharField(max_length=255, blank=True, default="", db_index=True)
 
     class Meta:
         verbose_name = "Survey Interview (cache)"
@@ -402,6 +407,7 @@ class SurveyDashboardSnapshot(models.Model):
 
     active_enumerators = models.IntegerField(default=0)
     json_ext = models.JSONField(db_column="Json_ext", blank=True, default=dict)
+    hq_url = models.CharField(max_length=255, blank=True, default="", db_index=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -410,7 +416,7 @@ class SurveyDashboardSnapshot(models.Model):
         verbose_name = "Survey Dashboard Snapshot"
         verbose_name_plural = "Survey Dashboard Snapshots"
         ordering = ["-snapshot_date"]
-        unique_together = [("snapshot_date", "questionnaire_id")]
+        unique_together = [("snapshot_date", "questionnaire_id", "hq_url")]
 
     def __str__(self):
         return f"{self.snapshot_date} ({self.questionnaire_id or 'ALL'})"

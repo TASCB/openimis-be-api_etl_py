@@ -8,7 +8,8 @@ from django.core.cache import cache
 from django.test import TestCase
 from django.utils import timezone
 
-from api_etl.models import SurveyDashboardSnapshot, SurveyInterviewCache
+from api_etl.apps import ApiEtlConfig
+from api_etl.models import PulledHistory, SurveyDashboardSnapshot, SurveyInterviewCache
 from api_etl.services import survey_dashboard_service as svc
 
 QID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -154,10 +155,55 @@ class SnapshotKeyTests(_Base):
     def test_legacy_guid_rows_are_still_read(self):
         day = svc._local(timezone.now()).date() - timedelta(days=3)
         SurveyDashboardSnapshot.objects.create(snapshot_date=day, questionnaire_id=QID, completed=7,
-                                               cumulative_completed=7)
+                                               cumulative_completed=7, hq_url=svc.current_hq_url())
         svc.take_daily_snapshot(IDENT, {"Completed": 8})
         hist = svc.status_history(IDENT)
         self.assertEqual([h["completed"] for h in hist], [7, 8])
+
+
+class CurrentHqScopeTests(_Base):
+    OLD_HQ = "http://old-hq.example:9700"
+
+    def setUp(self):
+        super().setUp()
+        PulledHistory.objects.filter(questionnaire_id__startswith=QID).delete()
+        for name, value in (("export_base_url", "http://new-hq.example:9700/"), ("export_workspace", "")):
+            p = patch.object(ApiEtlConfig, name, value, create=True)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_upsert_tags_rows_with_the_current_hq(self):
+        self.upsert(_brief("i1", "Completed"))
+        self.assertEqual(SurveyInterviewCache.objects.get(interview_id="i1").hq_url, "http://new-hq.example:9700")
+
+    def test_rows_from_another_hq_are_hidden(self):
+        self.upsert(_brief("mine", "Completed"))
+        SurveyInterviewCache.objects.create(interview_id="theirs", questionnaire_id=QID, questionnaire_version=2,
+                                            status="Completed", hq_url=self.OLD_HQ)
+        ids = [r.interview_id for r in svc.list_interviews(questionnaire_id=IDENT)]
+        self.assertEqual(ids, ["mine"])
+
+    def test_questionnaire_picker_skips_another_hq(self):
+        other = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        SurveyInterviewCache.objects.filter(questionnaire_id=other).delete()
+        SurveyInterviewCache.objects.create(interview_id="theirs", questionnaire_id=other, questionnaire_version=1,
+                                            status="Completed", hq_url=self.OLD_HQ)
+        self.upsert(_brief("mine", "Completed"))
+        ids = {q["id"] for q in svc.list_dashboard_questionnaires()}
+        self.assertIn(QID, ids)
+        self.assertNotIn(other, ids)
+
+    def test_snapshots_from_another_hq_are_hidden(self):
+        day = svc._local(timezone.now()).date() - timedelta(days=2)
+        SurveyDashboardSnapshot.objects.create(snapshot_date=day, questionnaire_id=IDENT, completed=99,
+                                               hq_url=self.OLD_HQ)
+        svc.take_daily_snapshot(IDENT, {"Completed": 4})
+        self.assertEqual([h["completed"] for h in svc.status_history(IDENT)], [4])
+
+    def test_cursor_is_kept_per_hq(self):
+        key = svc._cursor_key(IDENT)
+        with patch.object(ApiEtlConfig, "export_base_url", self.OLD_HQ):
+            self.assertNotEqual(svc._cursor_key(IDENT), key)
 
 
 class EagerCeleryTests(_Base):

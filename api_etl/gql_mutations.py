@@ -301,7 +301,7 @@ class RefreshSurveyDashboardMutation(graphene.Mutation):
         if (
             type(user) is AnonymousUser
             or not getattr(user, "id", None)
-            or not user.has_perms(ApiEtlConfig.gql_mutation_execute_api_etl_rule_perms)
+            or not user.has_perms(ApiEtlConfig.gql_query_survey_dashboard_perms)
         ):
             raise PermissionError("Unauthorized")
         from api_etl.services import survey_dashboard_service as svc
